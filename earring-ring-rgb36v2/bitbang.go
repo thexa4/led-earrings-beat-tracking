@@ -75,31 +75,19 @@ func disableLEDs() {
 //
 //go:noinline
 func setLEDs(index int, led0, led1, led2 uint32) {
-	switch index {
+	// Every third bitplane uses the same timing group; the C helpers only
+	// touch memory (the timing-critical part is bitbang_show_leds), so the
+	// group is picked from the index instead of repeating twelve inlined
+	// copies here.
+	switch index / 3 {
 	case 0:
-		C.bitbang_update_bitplane_1(led0, led1, led2, &bitplanes[0][0])
+		C.bitbang_update_bitplane_1(led0, led1, led2, &bitplanes[index][0])
 	case 1:
-		C.bitbang_update_bitplane_1(led0, led1, led2, &bitplanes[1][0])
+		C.bitbang_update_bitplane_2(led0, led1, led2, &bitplanes[index][0])
 	case 2:
-		C.bitbang_update_bitplane_1(led0, led1, led2, &bitplanes[2][0])
+		C.bitbang_update_bitplane_3(led0, led1, led2, &bitplanes[index][0])
 	case 3:
-		C.bitbang_update_bitplane_2(led0, led1, led2, &bitplanes[3][0])
-	case 4:
-		C.bitbang_update_bitplane_2(led0, led1, led2, &bitplanes[4][0])
-	case 5:
-		C.bitbang_update_bitplane_2(led0, led1, led2, &bitplanes[5][0])
-	case 6:
-		C.bitbang_update_bitplane_3(led0, led1, led2, &bitplanes[6][0])
-	case 7:
-		C.bitbang_update_bitplane_3(led0, led1, led2, &bitplanes[7][0])
-	case 8:
-		C.bitbang_update_bitplane_3(led0, led1, led2, &bitplanes[8][0])
-	case 9:
-		C.bitbang_update_bitplane_4(led0, led1, led2, &bitplanes[9][0])
-	case 10:
-		C.bitbang_update_bitplane_4(led0, led1, led2, &bitplanes[10][0])
-	case 11:
-		C.bitbang_update_bitplane_4(led0, led1, led2, &bitplanes[11][0])
+		C.bitbang_update_bitplane_4(led0, led1, led2, &bitplanes[index][0])
 	}
 }
 

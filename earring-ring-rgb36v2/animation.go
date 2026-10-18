@@ -23,7 +23,7 @@ const (
 	modeVUMeter
 	modeCustom0
 	modeCustom1
-	modeCustom2
+	modeSync
 	modeLast
 
 	modeTest
@@ -31,22 +31,29 @@ const (
 	modePowerOn
 )
 
-var variantsPerMode = [...]uint8{
-	modeTrace:     3,
-	modeNoise:     uint8(len(noisePatterns)),
-	modeFire:      6,
-	modeFireSound: 6,
-	modeStatic:    uint8(len(staticColors)),
-	modeVUMeter:   uint8(len(staticColors)),
-	modeFlag:      uint8(len(allFlags)),
-	modeSparkle:   uint8(len(sparkleVariants)),
-	modeQA:        2,
-}
+// Number of variants per mode, indexed by mode value (custom modes are
+// capped by the pattern itself, hence 0 entries there). A const string for
+// the same reason as the color tables in flags.go: no initializer, no .data,
+// one byte per mode in flash only.
+const variantsPerMode = "\x03" + // modeTrace
+	"\x05" + // modeNoise (numNoisePatterns)
+	"\x06" + // modeFire
+	"\x06" + // modeFireSound
+	"\x0d" + // modeStatic (numStaticColors)
+	"\x0a" + // modeFlag (numFlags)
+	"\x04" + // modeSparkle (numSparkleVariants)
+	"\x0d" + // modeVUMeter (numStaticColors)
+	"\x00" + // modeCustom0: capped by the pattern itself
+	"\x00" + // modeCustom1: ditto
+	"\x01" + // modeSync: the pattern is chosen by the music, not the user
+	"\x00" + // modeLast (not a mode)
+	"\x00" + // modeTest
+	"\x02" // modeQA
 
 // Cycle to the next variant within a mode.
 func animationNextVariant(mode, variant int) int {
 	variant++
-	if mode == modeCustom0 || mode == modeCustom1 || mode == modeCustom2 {
+	if mode == modeCustom0 || mode == modeCustom1 {
 		// Custom modes have their variant defined in the program itself.
 		if variant > customPattern.MaxVariant() {
 			variant = 0
@@ -82,8 +89,8 @@ func animate(mode, variant, led, frame int) Color {
 		return showCustom(led, frame, variant, 0)
 	case modeCustom1:
 		return showCustom(led, frame, variant, 1)
-	case modeCustom2:
-		return showCustom(led, frame, variant, 2)
+	case modeSync:
+		return syncAnimate(led)
 	case modeTest:
 		return testPulse(led, frame)
 	case modePowerOn:
@@ -126,8 +133,6 @@ func newFrame(mode, variant, frame int) {
 		customNextFrame(frame, variant)
 	case modeCustom1:
 		customNextFrame(frame, variant)
-	case modeCustom2:
-		customNextFrame(frame, variant)
 	case modeQA:
 		customNextFrame(frame, variant)
 	}
@@ -141,35 +146,30 @@ func initMode(mode int) {
 		customLoadPattern(0, true)
 	case modeCustom1:
 		customLoadPattern(1, true)
-	case modeCustom2:
-		customLoadPattern(2, true)
 	}
 }
 
-var noisePatterns = [...]struct {
-	speed   uint8            // higher means faster
-	spread  uint8            // higher means colors more close together
-	palette ledsgo.Palette16 // FastLED palette
-}{
-	{10, 11, ledsgo.PartyColors},
-	{10, 11, ledsgo.RainbowColors},
-	{9, 12, ledsgo.ForestColors},
-	{9, 12, ledsgo.OceanColors},
-	{9, 12, ledsgo.CloudColors},
-}
+// The noise animation's per-pattern parameters, all compile-time constants:
+// speed/spread bytes plus the five palettes (16 RGBA entries each, see
+// noisePalettes.go) concatenated. An earlier form stored these as a var
+// struct array, which cost an initializer function, a .data image and RAM
+// for data that is never written; const strings live in flash only.
+const (
+	numNoisePatterns = 5
+	noiseSpeeds      = "\x0a\x0a\x09\x09\x09" // higher means faster
+	noiseSpreads     = "\x0b\x0b\x0c\x0c\x0c" // higher means colors more close together
+	noisePalettes    = PartyColors + RainbowColors + ForestColors + OceanColors + CloudColors
+)
 
 // Show some Simplex noise on the earring, with various predefined patterns.
 func noise(led, frame, variant int) Color {
-	// Determine palette to show.
-	if variant >= len(noisePatterns) {
+	if variant >= numNoisePatterns {
 		return NewColor(0, 0, 0) // shouldn't happen
 	}
-	pattern := &noisePatterns[variant]
-
-	x := uint32(frame) << uint32(pattern.speed)
-	y := uint32(led) << uint32(pattern.spread)
-	c := pattern.palette.ColorAt(ledsgo.Perlin2(x, y) * 2)
-	return NewColor(c.R, c.G, c.B)
+	x := uint32(frame) << uint32(noiseSpeeds[variant])
+	y := uint32(led) << uint32(noiseSpreads[variant])
+	r, g, b := palette16At(noisePalettes[variant*64:(variant+1)*64], ledsgo.Perlin2(x, y)*2)
+	return NewColor(r, g, b)
 }
 
 var traceIndex uint8
@@ -397,215 +397,22 @@ func indexFromBottom(index int) int {
 	return newIndex
 }
 
-var (
-	staticColors = [...]Color{
-		NewColor(0x99, 0x00, 0x66), // purple
-		NewColor(0xee, 0x00, 0x11), // hot pink
-		NewColor(0xff, 0x00, 0x00), // red
-		NewColor(0xcc, 0x22, 0x00), // orange
-		NewColor(0x88, 0x77, 0x00), // yellow (orange-ish)
-		NewColor(0x33, 0xcc, 0x00), // yellow (green-ish)
-		NewColor(0x00, 0xff, 0x00), // green
-		NewColor(0x00, 0xdd, 0x22), // green-turquoise
-		NewColor(0x00, 0x99, 0x66), // turquoise
-		NewColor(0x00, 0x33, 0xcc), // greenish blue
-		NewColor(0x00, 0x00, 0xff), // blue
-		NewColor(0x11, 0x00, 0xee), // purple-ish blue
-		NewColor(0x55, 0x00, 0xaa), // blueish purple
-	}
-)
+var ()
 
 func staticColor(led, frame, variant int) Color {
-	if variant >= len(staticColors) {
+	if variant >= numStaticColors {
 		return NewColor(0, 0, 0) // should be unreachable
 	}
-	return staticColors[variant]
+	return staticColors.color(variant)
 }
 
-type Palette [numLEDs]Color
-
-var (
-	flagRed    = NewColor(0xff, 0x00, 0x00)
-	flagOrange = NewColor(0xff, 0x55, 0x00)
-	flagYellow = NewColor(0x88, 0xff, 0x00)
-	flagGreen  = NewColor(0x00, 0xff, 0x00)
-	flagBlue   = NewColor(0x00, 0x00, 0xff)
-	flagPurple = NewColor(0x80, 0x00, 0x80)
-	flagLGBT   = Palette{
-		flagRed, flagRed, flagRed, flagRed, flagRed, flagRed,
-		flagOrange, flagOrange, flagOrange, flagOrange, flagOrange, flagOrange,
-		flagYellow, flagYellow, flagYellow, flagYellow, flagYellow, flagYellow,
-		flagGreen, flagGreen, flagGreen, flagGreen, flagGreen, flagGreen,
-		flagBlue, flagBlue, flagBlue, flagBlue, flagBlue, flagBlue,
-		flagPurple, flagPurple, flagPurple, flagPurple, flagPurple, flagPurple,
-	}
-
-	flagPastelBlue  = NewColor(0x11, 0x33, 0x88)
-	flagPastelPink  = NewColor(0x80, 0x22, 0x22)
-	flagPastelWhite = NewColor(0x88, 0xaa, 0xaa)
-	flagTrans       = Palette{
-		flagPastelBlue, flagPastelBlue, flagPastelBlue, flagPastelBlue,
-		flagPastelPink, flagPastelPink, flagPastelPink, flagPastelPink,
-		flagPastelWhite, flagPastelWhite, flagPastelWhite, flagPastelWhite,
-		flagPastelPink, flagPastelPink, flagPastelPink, flagPastelPink,
-		flagPastelBlue, flagPastelBlue, flagPastelBlue, flagPastelBlue, flagPastelBlue, flagPastelBlue,
-		flagPastelPink, flagPastelPink, flagPastelPink, flagPastelPink,
-		flagPastelWhite, flagPastelWhite, flagPastelWhite, flagPastelWhite,
-		flagPastelPink, flagPastelPink, flagPastelPink, flagPastelPink,
-		flagPastelBlue, flagPastelBlue,
-	}
-
-	// Five-stripe lesbian flag (five colors are easier to distinguish than
-	// seven).
-	flagLesbianRed    = NewColor(0xC0, 0x00, 0x00)
-	flagLesbianOrange = NewColor(0xC0, 0x40, 0x00)
-	flagLesbianWhite  = NewColor(0x60, 0x50, 0x90)
-	flagLesbianPink   = NewColor(0x40, 0x08, 0x30)
-	flagLesbianPurple = NewColor(0x20, 0x00, 0x10)
-	flagLesbian       = Palette{
-		flagLesbianRed, flagLesbianRed, flagLesbianRed, flagLesbianRed,
-		flagLesbianOrange, flagLesbianOrange, flagLesbianOrange, flagLesbianOrange,
-		flagLesbianWhite, flagLesbianWhite, flagLesbianWhite, flagLesbianWhite,
-		flagLesbianPink, flagLesbianPink, flagLesbianPink, flagLesbianPink,
-		flagLesbianPurple, flagLesbianPurple, flagLesbianPurple, flagLesbianPurple, flagLesbianPurple, flagLesbianPurple,
-		flagLesbianPink, flagLesbianPink, flagLesbianPink, flagLesbianPink,
-		flagLesbianWhite, flagLesbianWhite, flagLesbianWhite, flagLesbianWhite,
-		flagLesbianOrange, flagLesbianOrange, flagLesbianOrange, flagLesbianOrange,
-		flagLesbianRed, flagLesbianRed,
-	}
-
-	// Flag for gay men. This is the less common 5 stripe version, since that's
-	// easier to make on the earrings. (Not sure how many men will wear these,
-	// but it's there for those who want it).
-	flagGayDarkGreen  = NewColor(0x00, 0x18, 0x08)
-	flagGayLightGreen = NewColor(0x10, 0x40, 0x20)
-	flagGayWhite      = NewColor(0x60, 0x50, 0x90)
-	flagGayLightBlue  = NewColor(0x10, 0x10, 0x90)
-	flagGayDarkBlue   = NewColor(0x08, 0x00, 0x20)
-	flagGay           = Palette{
-		flagGayDarkGreen, flagGayDarkGreen, flagGayDarkGreen, flagGayDarkGreen,
-		flagGayLightGreen, flagGayLightGreen, flagGayLightGreen, flagGayLightGreen,
-		flagGayWhite, flagGayWhite, flagGayWhite, flagGayWhite,
-		flagGayLightBlue, flagGayLightBlue, flagGayLightBlue, flagGayLightBlue,
-		flagGayDarkBlue, flagGayDarkBlue, flagGayDarkBlue, flagGayDarkBlue, flagGayDarkBlue, flagGayDarkBlue,
-		flagGayLightBlue, flagGayLightBlue, flagGayLightBlue, flagGayLightBlue,
-		flagGayWhite, flagGayWhite, flagGayWhite, flagGayWhite,
-		flagGayLightGreen, flagGayLightGreen, flagGayLightGreen, flagGayLightGreen,
-		flagGayDarkGreen, flagGayDarkGreen,
-	}
-
-	// This one really pops! While the number of LEDs for each color is
-	// balanced, it might look better with a bit more for yellow?
-	flagNonBinaryYellow = NewColor(0xaa, 0xaa, 0x00)
-	flagNonBinaryWhite  = NewColor(0x60, 0x50, 0x90)
-	flagNonBinaryPurple = NewColor(0x50, 0x00, 0x40)
-	flagNonBinaryBlack  = NewColor(0x00, 0x00, 0x00)
-	flagNonBinary       = Palette{
-		flagNonBinaryYellow, flagNonBinaryYellow, flagNonBinaryYellow, flagNonBinaryYellow,
-		flagNonBinaryWhite, flagNonBinaryWhite, flagNonBinaryWhite, flagNonBinaryWhite, flagNonBinaryWhite,
-		flagNonBinaryPurple, flagNonBinaryPurple, flagNonBinaryPurple, flagNonBinaryPurple, flagNonBinaryPurple,
-		flagNonBinaryBlack, flagNonBinaryBlack, flagNonBinaryBlack, flagNonBinaryBlack, flagNonBinaryBlack, flagNonBinaryBlack, flagNonBinaryBlack, flagNonBinaryBlack,
-		flagNonBinaryPurple, flagNonBinaryPurple, flagNonBinaryPurple, flagNonBinaryPurple, flagNonBinaryPurple,
-		flagNonBinaryWhite, flagNonBinaryWhite, flagNonBinaryWhite, flagNonBinaryWhite, flagNonBinaryWhite,
-		flagNonBinaryYellow, flagNonBinaryYellow, flagNonBinaryYellow, flagNonBinaryYellow,
-	}
-
-	flagBiPink   = NewColor(0xD0, 0x00, 0x08)
-	flagBiPurple = NewColor(0x40, 0x00, 0x30)
-	flagBiBlue   = NewColor(0x00, 0x00, 0x80)
-	flagBi       = Palette{
-		flagBiPink, flagBiPink, flagBiPink, flagBiPink, flagBiPink, flagBiPink, flagBiPink, flagBiPink,
-		flagBiPurple, flagBiPurple, flagBiPurple, flagBiPurple,
-		flagBiBlue, flagBiBlue, flagBiBlue, flagBiBlue, flagBiBlue, flagBiBlue, flagBiBlue, flagBiBlue, flagBiBlue, flagBiBlue, flagBiBlue, flagBiBlue, flagBiBlue, flagBiBlue,
-		flagBiPurple, flagBiPurple, flagBiPurple, flagBiPurple,
-		flagBiPink, flagBiPink, flagBiPink, flagBiPink, flagBiPink, flagBiPink,
-	}
-
-	flagPanPink   = NewColor(0xD0, 0x00, 0x10)
-	flagPanYellow = NewColor(0xaa, 0xaa, 0x00)
-	flagPanBlue   = NewColor(0x08, 0x08, 0xFF)
-	flagPan       = Palette{
-		flagPanPink, flagPanPink, flagPanPink, flagPanPink, flagPanPink, flagPanPink,
-		flagPanYellow, flagPanYellow, flagPanYellow, flagPanYellow, flagPanYellow, flagPanYellow,
-		flagPanBlue, flagPanBlue, flagPanBlue, flagPanBlue, flagPanBlue, flagPanBlue,
-		flagPanBlue, flagPanBlue, flagPanBlue, flagPanBlue, flagPanBlue, flagPanBlue,
-		flagPanYellow, flagPanYellow, flagPanYellow, flagPanYellow, flagPanYellow, flagPanYellow,
-		flagPanPink, flagPanPink, flagPanPink, flagPanPink, flagPanPink, flagPanPink,
-	}
-
-	// Hard to represent because of the black, but I did my best. Since it's a
-	// circle, the black does stand out.
-	flagAceBlack  = NewColor(0x00, 0x00, 0x00)
-	flagAceGray   = NewColor(0x10, 0x10, 0x18)
-	flagAceWhite  = NewColor(0x60, 0x50, 0x90)
-	flagAcePurple = NewColor(0x50, 0x00, 0x40)
-	flagAce       = Palette{
-		flagAceBlack, flagAceBlack, flagAceBlack, flagAceBlack,
-		flagAceGray, flagAceGray, flagAceGray, flagAceGray, flagAceGray,
-		flagAceWhite, flagAceWhite, flagAceWhite, flagAceWhite, flagAceWhite,
-		flagAcePurple, flagAcePurple, flagAcePurple, flagAcePurple, flagAcePurple, flagAcePurple, flagAcePurple, flagAcePurple,
-		flagAceWhite, flagAceWhite, flagAceWhite, flagAceWhite, flagAceWhite,
-		flagAceGray, flagAceGray, flagAceGray, flagAceGray, flagAceGray,
-		flagAceBlack, flagAceBlack, flagAceBlack, flagAceBlack,
-	}
-
-	// Aromantic flag.
-	flagAroGreen1 = NewColor(0x00, 0x80, 0x08)
-	flagAroGreen2 = NewColor(0x10, 0x60, 0x28)
-	flagAroWhite  = NewColor(0x60, 0x50, 0x90)
-	flagAroGray   = NewColor(0x10, 0x10, 0x18)
-	flagAroBlack  = NewColor(0x00, 0x00, 0x00)
-	flagAro       = Palette{
-		flagAroGreen1, flagAroGreen1, flagAroGreen1, flagAroGreen1,
-		flagAroGreen2, flagAroGreen2, flagAroGreen2, flagAroGreen2,
-		flagAroWhite, flagAroWhite, flagAroWhite, flagAroWhite,
-		flagAroGray, flagAroGray, flagAroGray, flagAroGray,
-		flagAroBlack, flagAroBlack, flagAroBlack, flagAroBlack, flagAroBlack, flagAroBlack,
-		flagAroGray, flagAroGray, flagAroGray, flagAroGray,
-		flagAroWhite, flagAroWhite, flagAroWhite, flagAroWhite,
-		flagAroGreen2, flagAroGreen2, flagAroGreen2, flagAroGreen2,
-		flagAroGreen1, flagAroGreen1,
-	}
-
-	// The new polyamory flag, with the yellow heart:
-	// https://nl.wikipedia.org/wiki/Bestand:Tricolor_Polyamory_Pride_Flag.svg
-	// It's hard to represent the dark purple at the bottom, this seems as dark
-	// and purplish as possible.
-	flagPolyBlue   = NewColor(0x08, 0x08, 0xFF)
-	flagPolyRed    = NewColor(0xC0, 0x00, 0x10)
-	flagPolyPurple = NewColor(0x08, 0x00, 0x15)
-	flagPolyYellow = NewColor(0xaa, 0xaa, 0x00)
-	flagPolyWhite  = NewColor(0x60, 0x50, 0x90)
-	flagPoly       = Palette{
-		flagPolyBlue, flagPolyBlue, flagPolyBlue, flagPolyBlue, flagPolyBlue, flagPolyBlue,
-		flagPolyRed, flagPolyRed, flagPolyRed, flagPolyRed, flagPolyRed, flagPolyRed,
-		flagPolyPurple, flagPolyPurple, flagPolyPurple, flagPolyPurple, flagPolyPurple, flagPolyPurple,
-		flagPolyPurple, flagPolyPurple, flagPolyPurple, flagPolyPurple, flagPolyPurple, flagPolyPurple,
-		flagPolyRed, flagPolyRed, flagPolyRed, flagPolyRed,
-		flagPolyWhite, flagPolyYellow, flagPolyYellow, flagPolyYellow, flagPolyWhite, // the heart shape
-		flagPolyBlue, flagPolyBlue, flagPolyBlue,
-	}
-
-	allFlags = [...]Palette{
-		flagLGBT,
-		flagTrans,
-		flagLesbian,
-		flagGay,
-		flagNonBinary,
-		flagBi,
-		flagPan,
-		flagAce,
-		flagAro,
-		flagPoly,
-	}
-)
-
+// (Palette and the flag tables moved to flags.go.)
 func showFlag(led, frame, variant int) Color {
-	if variant >= len(allFlags) {
+	if variant >= numFlags {
 		// This shouldn't actually happen.
 		return NewColor(0, 0, 0)
 	}
-	return allFlags[variant][led]
+	return allFlags[flagSize*variant : flagSize*(variant+1)].color(led)
 }
 
 // Basic VU meter like animation, with different colors.
@@ -628,8 +435,8 @@ func vuMeter(led, frame, variant int) Color {
 
 	// Determine color for this VU meter.
 	c := NewColor(0, 0, 0)
-	if variant < len(staticColors) {
-		c = staticColors[variant]
+	if variant < numStaticColors {
+		c = staticColors.color(variant)
 	}
 
 	frameIntensity := int(currentVolume()) / 32
@@ -652,13 +459,6 @@ func vuMeter(led, frame, variant int) Color {
 var sparkleColors [numLEDs]Color
 var sparkleBrightness [numLEDs]uint8
 
-var sparkleVariants = [...][2]Color{
-	[2]Color{NewColor(0xff, 0x00, 0xff), NewColor(0x00, 0x99, 0x66)}, // purple, turquoise
-	[2]Color{NewColor(0xff, 0x00, 0xff), NewColor(0xff, 0x00, 0x00)}, // purple, red
-	[2]Color{NewColor(0xff, 0x00, 0x00), NewColor(0xff, 0xff, 0x00)}, // red, yellow
-	[2]Color{NewColor(0xff, 0xff, 0x00), NewColor(0x00, 0xff, 0x00)}, // yellow, green
-}
-
 func sparkleNextFrame(variant int) {
 	addPower(uint16(processSamples()))
 
@@ -672,10 +472,10 @@ func sparkleNextFrame(variant int) {
 		index := fastModulo36(vol & 0xff)
 
 		// Pick one of the two colors.
-		if variant > len(sparkleVariants) {
+		if variant > numSparkleVariants {
 			variant = 0 // shouldn't happen, but just to be sure
 		}
-		c := sparkleVariants[variant][r>>31]
+		c := sparkleVariants.color(variant*2 + int(r>>31))
 
 		// Store this sparkle.
 		sparkleColors[index] = c

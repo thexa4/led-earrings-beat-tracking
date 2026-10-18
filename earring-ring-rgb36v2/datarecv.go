@@ -43,7 +43,22 @@ var adcData [windowSize * 2]uint16
 // ADC data with DC offset removed.
 // Two extra elements: the last one to serve as a special "stop" value and the
 // one after that because the Goertzel pair code reads two values at once.
-var adcDataNormalized [windowSize + 2]int32
+//
+// To save RAM this is overlaid on the tail of animationBuf, which is free
+// during a data receive: the fountain decoder reconstructs the program into
+// animationBuf[1:] up to maxProgramSize bytes (byte 1536), while this overlay
+// starts at byte 4*(animationBufSize/4 - (windowSize+2)) = 1748, so the two
+// never overlap (checked by the array assertion below). The Goertzel and copy
+// code receive the buffer as an ordinary slice argument, so unlike an overlay
+// of the sync pipeline (which is fed from the same loop that reads the DMA
+// buffer) the aliasing cast costs the hot loops nothing. receiveData sets
+// both stop-sentinel words explicitly because, unlike the old bss array, the
+// overlay does not come pre-zeroed.
+const adcDataNormWords = windowSize + 2
+
+var _ [len(animationBuf) - maxProgramSize/4 - adcDataNormWords]int8 // disjoint
+
+var adcDataNormalized = unsafe.Slice((*int32)(unsafe.Pointer(&animationBuf[len(animationBuf)-adcDataNormWords])), adcDataNormWords)
 
 func adcDataWriteIndex() uint32 {
 	return uint32(len(adcData)) - stm32.DMA1.CH[0].NDTR.Get()
@@ -55,6 +70,7 @@ var adcWriteWindow uint8 = 0 // 0 or 1 to indicate current window
 
 var dcOffset uint32
 
+//go:noinline
 func adcDelaySamples(samples uint32) {
 	if samples != 0 {
 		stm32.DMA1.CH[0].CR.ClearBits(stm32.DMA_CH_CR_EN)
@@ -79,6 +95,8 @@ func adcDelaySamples(samples uint32) {
 
 // Wait until the write pointer is in the next window, and update
 // adcDataNormalized so it contains the data for the window that's ready.
+//
+//go:noinline
 func adcDataNextWindow(delayBefore uint32) {
 	var rawSamples []uint16
 	switch adcWriteWindow {
@@ -126,10 +144,6 @@ func dataRecv(slot int) {
 	if slot >= 1 {
 		A8.Configure(machine.PinConfig{Mode: machine.PinOutput})
 		A8.High()
-	}
-	if slot >= 2 {
-		A7.Configure(machine.PinConfig{Mode: machine.PinOutput})
-		A7.High()
 	}
 
 	// Enable HSI16.
@@ -194,6 +208,7 @@ func dataRecv(slot int) {
 	// Special marker used by the Goertzel implementation to know this is the
 	// end of the array.
 	adcDataNormalized[windowSize] = 0x7fff_ffff
+	adcDataNormalized[windowSize+1] = 0 // pair code reads two at once; overlay is not zeroed
 
 	// Receive the data.
 	decoder.Initialize(animationBuf[1:], maxProgramSize, sampleRate)

@@ -1,6 +1,8 @@
 package main
 
 // State: current mode, current variant, previous variants, 4 hash bytes
+//
+//go:align 4 // flashWrite reinterprets this as words
 var storedState [32]uint8
 
 const (
@@ -23,12 +25,21 @@ func main() {
 	index := 0 // 0..11, group of 3 LEDs that will be updated together
 	frame := 0
 	mode := int(storedState[stateOffsetMode])
+	// modeCustom2 was removed; state saved by old firmware may contain a now
+	// invalid mode (10 used to be custom2, 14 used to be QA).
+	if mode >= modeLast && mode != modeTest && mode != modeQA {
+		mode = 0
+		storedState[stateOffsetMode] = 0
+	}
 	variant := 0
 	if mode < len(modeVariants) {
 		variant = int(modeVariants[mode])
 	}
 	if animationNeedsMic(mode) {
 		enableMic()
+	}
+	if mode == modeSync {
+		startSync()
 	}
 	initMode(mode)
 	modeFramesPressed := 0
@@ -41,7 +52,9 @@ func main() {
 
 		// Read the ADC, intentionally done in between so that the LED power
 		// won't interfere too much with the microphone.
-		if animationNeedsMic(mode) {
+		if syncRunning {
+			syncPoll()
+		} else if animationNeedsMic(mode) {
 			updateMic(index)
 		}
 
@@ -66,6 +79,7 @@ func main() {
 			if modeFramesPressed == 30 {
 				// Always disable the microphone when sleeping.
 				disableMic()
+				stopSync()
 
 				turnOffAnimation(mode, variant, frame)
 
@@ -84,7 +98,9 @@ func main() {
 					mode = previousMode
 
 					// Woke up again, so start up interfaces.
-					if animationNeedsMic(mode) {
+					if mode == modeSync {
+						startSync()
+					} else if animationNeedsMic(mode) {
 						enableMic()
 					}
 				}
@@ -107,11 +123,20 @@ func main() {
 						setLEDs(i, 0, 0, 0)
 					}
 
+					// Leave whatever audio setup the previous mode had, then
+					// configure for the new mode. Disabling both (each is a
+					// no-op unless active) keeps this correct for every
+					// transition, including sync <-> mic modes: the mic modes
+					// leave the ADC on PCLK with low-frequency mode set,
+					// which would silently corrupt the sync capture config.
+					stopSync()
+					disableMic()
+
 					// Only enable the microphone when needed.
-					if animationNeedsMic(mode) {
+					if mode == modeSync {
+						startSync()
+					} else if animationNeedsMic(mode) {
 						enableMic()
-					} else {
-						disableMic()
 					}
 
 					initMode(mode)
@@ -137,7 +162,7 @@ func main() {
 				}
 				if variantBtnFramesPressed == 30 {
 					slot := mode - modeCustom0
-					if slot >= 0 && slot < 3 {
+					if slot >= 0 && slot < 2 {
 						// Long press is to receive data, not to switch to the
 						// next variant.
 						variantBtnFramesPressed = 0

@@ -1,0 +1,8 @@
+# Copyrighted audio, do not commit
+podcast.mp3
+
+# Downloaded ST datasheet (74 MB, copyrighted)
+datasheet/
+
+# Build artifacts
+earring-ring-rgb36v2/firmware.elf

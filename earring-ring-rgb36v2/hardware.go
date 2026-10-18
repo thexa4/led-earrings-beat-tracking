@@ -167,6 +167,7 @@ func waitForPoweron() bool {
 var micEnabled bool
 
 //go:noinline
+//go:noinline
 func enableMic() {
 	if micEnabled {
 		return
@@ -232,6 +233,7 @@ func enableMic() {
 }
 
 //go:noinline
+//go:noinline
 func disableMic() {
 	if !micEnabled {
 		return
@@ -259,11 +261,10 @@ func updateMic(index int) {
 	stm32.ADC.CR.Set(stm32.ADC_CR_ADEN | stm32.ADC_CR_ADSTART)
 }
 
+//go:noinline
 func loadState() {
-	// Load previous settings from flash.
-	numPages := uint32(machine.Flash.Size()) / uint32(machine.Flash.EraseBlockSize())
-	lastPage := numPages - 1
-	machine.Flash.ReadAt(storedState[:], int64(lastPage*uint32(machine.Flash.EraseBlockSize())))
+	// Load previous settings from flash (the very last page).
+	flashRead(storedState[:], flashDataEnd-flashPageSize)
 
 	// Check whether they seem to be correct.
 	calculatedHash := hash32(storedState[:len(storedState)-4])
@@ -283,6 +284,7 @@ func loadState() {
 	}
 }
 
+//go:noinline
 func saveState() {
 	// Calculate the hash for this state.
 	hash := hash32(storedState[:len(storedState)-4])
@@ -292,10 +294,8 @@ func saveState() {
 	storedState[len(storedState)-1] = uint8(hash >> 24)
 
 	// Store the state in the last page.
-	numPages := uint32(machine.Flash.Size()) / uint32(machine.Flash.EraseBlockSize())
-	lastPage := numPages - 1
-	machine.Flash.EraseBlocks(int64(lastPage), 1)
-	machine.Flash.WriteAt(storedState[:], int64(lastPage*uint32(machine.Flash.EraseBlockSize())))
+	flashErasePages(flashDataEnd-flashPageSize, 1)
+	flashWrite(flashDataEnd-flashPageSize, storedState[:])
 }
 
 // Get FNV-1a hash of the given memory buffer.
@@ -312,12 +312,14 @@ func hash32(buf []byte) uint32 {
 	return result
 }
 
+//go:noinline
 func loadPattern(slot int) []byte {
 	if slot >= 0 {
 		// Load from flash, replacing what was in animationBuf before.
 
-		// We also store config info in flash, make sure to leave it alone.
-		patternsFlashEnd := machine.FlashDataEnd() - uintptr(machine.Flash.EraseBlockSize())
+		// We also store config info in flash, make sure to leave it alone
+		// (the very last page, see loadState/saveState).
+		patternsFlashEnd := uintptr(flashDataEnd - flashPageSize)
 
 		slotAddr := patternsFlashEnd - slotSize*uintptr(slot+1)
 		animationInFlash := unsafe.Slice((*uint32)(unsafe.Pointer(slotAddr)), slotSize/4)
@@ -338,31 +340,28 @@ func loadPattern(slot int) []byte {
 }
 
 // Store a pattern in flash.
+//
+//go:noinline
 func storePattern(slot int) (ok bool) {
-	// We also store config info in flash, make sure to leave it alone.
-	patternsFlashEnd := uintptr(machine.Flash.Size()) - uintptr(machine.Flash.EraseBlockSize())
+	// We also store config info in flash, make sure to leave it alone: the
+	// slot area ends one page before the end of the flash, same boundary
+	// loadPattern and loadState/saveState use.
+	const patternsEnd = flashSize - flashPageSize // offset from flashDataStart
 
-	// Find the start address (in machine.Flash) for this slot.
-	slotAddr := patternsFlashEnd - slotSize*uintptr(slot+1)
+	// Find the start of this slot.
+	slotOff := patternsEnd - slotSize*(slot+1)
+	if slotOff < 0 {
+		return false
+	}
+	addr := uintptr(flashDataStart) + uintptr(slotOff)
 
 	// Clear flash at the destination.
-	blockStart := int(slotAddr) / int(machine.Flash.EraseBlockSize())
-	numBlocks := slotSize / int(machine.Flash.EraseBlockSize())
-	if blockStart < 0 {
-		return false
-	}
-	err := machine.Flash.EraseBlocks(int64(blockStart), int64(numBlocks))
-	if err != nil {
-		return false
-	}
+	flashErasePages(addr, slotSize/flashPageSize)
 
 	// Write the pattern to flash.
 	data8Len := min(slotSize, len(animationBuf)*4)
 	data8 := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(animationBuf[:]))), data8Len)
-	_, err = machine.Flash.WriteAt(data8, int64(slotAddr))
-	if err != nil {
-		return false
-	}
+	flashWrite(addr, data8)
 
 	return true
 }
