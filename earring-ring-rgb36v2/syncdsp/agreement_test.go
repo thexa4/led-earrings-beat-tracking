@@ -194,7 +194,7 @@ func TestAgreement(t *testing.T) {
 			stableRun := 0 // frames since the reference's hash last changed
 			prevRef := uint32(0)
 			for f := range base {
-				if f < WarmupFrames {
+				if f < int(WarmupFrames) {
 					continue
 				}
 				if base[f].Hash != prevRef {

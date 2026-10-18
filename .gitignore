@@ -6,3 +6,6 @@ datasheet/
 
 # Build artifacts
 earring-ring-rgb36v2/firmware.elf
+
+# Python bytecode from tools/
+__pycache__/

@@ -62,13 +62,14 @@ type Pipeline struct {
 	//   total     sum of per-band log2 energies (Q8)
 	//   level     slow average of total
 	//   linPeak   peak-hold of the linear band-energy sum (SilenceDiv leak)
-	total     int32
-	prevTotal int32
-	fluxFloor int32
-	level     int32
-	linPeak   int32
-	onsetAge  int32 // frames since the last onset (100 = long ago)
-	silent    bool  // far quieter than the recent peak: leave things alone
+	total      int32
+	prevTotal  int32
+	prevTotal2 int32 // onset flux runs over two frames, see onsetDetect
+	fluxFloor  int32
+	level      int32
+	linPeak    int32
+	onsetAge   int32 // frames since the last onset (100 = long ago)
+	silent     bool  // far quieter than the recent peak: leave things alone
 
 	// Beat tracker.
 	beat BeatTracker
@@ -140,6 +141,10 @@ func (p *Pipeline) ProcessSample(v uint16) {
 // EndFrame finishes a frame of Window samples fed via ProcessSample.
 func (p *Pipeline) EndFrame() Events { return p.endFrame() }
 
+// BeatPeriod exposes the locked beat period (frames) for host tools
+// (tools/hostbeat); it is unreferenced on the device and the linker drops it.
+func (p *Pipeline) BeatPeriod() int32 { return p.beat.Period }
+
 //go:noinline
 func (p *Pipeline) endFrame() Events {
 	// 1. Fold this frame's band energies.
@@ -195,6 +200,7 @@ func (p *Pipeline) endFrame() Events {
 	} else if p.onsetAge < 100 {
 		p.onsetAge++
 	}
+	p.prevTotal2 = p.prevTotal
 	p.prevTotal = total
 	p.level += (total - p.level) >> 6
 
@@ -344,8 +350,20 @@ func (p *Pipeline) endFrame() Events {
 
 // onsetDetect is a cheap flux detector on the log-domain frame total, with a
 // leaky noise floor and a refractory period.
+//
+// The flux spans two frames (total now vs total two frames ago). A kick
+// attack rises over two or three frames, and a one-frame delta crosses the
+// threshold on whichever frame its *increment* first exceeds it - which one
+// that is varies by a frame between kicks, and at 64 fps one frame is 16 ms
+// of interval jitter. Measured at 16 kSPS with a one-frame delta, consecutive
+// kick intervals spread over 18..36 frames for a constant 143 BPM tempo, and
+// the beat histogram never accumulated LockCount votes. The two-frame delta
+// captures the whole attack in one number whichever frame the rise starts
+// on, which is exactly how it behaved at the old 8.8 kSPS frame rate, where
+// one frame already covered the attack (intervals then clustered in two
+// bins).
 func (p *Pipeline) onsetDetect(total int32) bool {
-	flux := total - p.prevTotal
+	flux := total - p.prevTotal2
 	absFlux := flux
 	if absFlux < 0 {
 		absFlux = -absFlux
@@ -394,8 +412,8 @@ func (p *Pipeline) decide(h uint32, barBeat bool, dev *[NBands]int32) {
 	// the pattern, not that the lag selects it.
 	returned := false
 	if b.Locked {
-		for _, lagBars := range [3]int{LagBars1, LagBars2, LagBars3} {
-			nominal := int32(lagBars * BeatsPerBar)
+		for _, lagBars := range [3]int32{LagBars1, LagBars2, LagBars3} {
+			nominal := lagBars * BeatsPerBar
 			for off := -LagTolerance; off <= LagTolerance; off++ {
 				lag := nominal + int32(off)
 				if lag < 1 || b.beat < lag || p.ringCount <= lag {
@@ -876,15 +894,34 @@ func (b *BeatTracker) Tick(onset bool, frame int32) (bool, bool) {
 }
 
 // vote folds an onset interval into the interval histogram with octave
-// reinforcement (Dixon-style), decaying old evidence.
+// reinforcement (Dixon-style) and a two-frame tolerance.
 //
 // The doubling fold carries weight 2, not 1: with hats exactly between
 // kicks, most measured intervals are half-beat intervals, and the ×2 fold is
 // the main source of beat-period evidence. With weight 1 it merely cancels
 // the per-vote decay and the tracker never locks (found in testing).
+//
+// The neighbour folds exist because real onsets are not frame-exact: over a
+// 12 s EDM segment at 16 kSPS the interval between consecutive kicks spreads
+// over 23..28 frames for a single tempo, and exact-bin voting dilutes that
+// evidence below LockCount - the tracker never locks and beats stay raw
+// onsets. Two frames either way (half weight per step) bridge the spread
+// while keeping the peak centred.
+//
+// Decay runs on every other vote for the same reason: one decrement per
+// onset bounds the achievable bin height by roughly the number of onsets,
+// and at 64 fps the onset rate (not the frame rate) sets the vote budget -
+// 12 s of 137 BPM music offers only ~27 intervals to split across bins.
+// Half-rate decay doubles the evidence horizon without touching the weights.
 func (b *BeatTracker) vote(interval int32) {
-	b.decay()
+	if b.onsetCount&1 == 0 {
+		b.decay()
+	}
 	b.addVote(interval, 4)
+	b.addVote(interval-1, 2)
+	b.addVote(interval+1, 2)
+	b.addVote(interval-2, 1)
+	b.addVote(interval+2, 1)
 	b.addVote(interval/2, 3)
 	b.addVote(interval*2, 2)
 }

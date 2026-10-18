@@ -597,7 +597,8 @@ ring) were superseded by measurement — see Stages 4-6.*
 
 *The shipped build also dropped the third custom pattern slot
 (`modeCustom2`, `stm32l031x6.ld`: `FLASH_TEXT = 32K - 128 - 1536*2`) and
-reached **29,516 B flash / 7,180 B RAM** of a 29,824 / 8,192 budget. The size
+reached **29,516 B flash / 7,180 B RAM** of a 29,824 / 8,192 budget (29,548 /
+7,176 with the §11.1 changes, both custom slots kept). The size
 was paid for with: `//go:noinline` boundaries around every DSP function
 (`-opt=2` otherwise inlines and unrolls the whole call graph into one blob),
 const-string color tables instead of `var` arrays (no initializer code, no
@@ -612,7 +613,8 @@ of lost register allocation.*
 
 ```go
 const (
-    SampleRate = 15997   // Hz; TIM22 PSC=130 @ 4.194 MHz (MSI Range 6)
+    SampleRate = 15997   // nominal Hz (bank coefficients); the device now
+                         // runs TIM22 PSC=499 @ 16 MHz HSI16 = exactly 16000
     Window     = 250     // samples per analysis frame (15.6 ms)
 
     NBands     = 8       // one-pole ladder: 7 corners + the lowpass remainder
@@ -642,12 +644,75 @@ const (
     NumPatterns            = 7        // = NBands-1 (one per winnable band)
 
     WarmupFrames        = 64
-    BeatMinPeriod       = 10  // frames ≈ 240 BPM
+    BeatMinPeriod       = 18  // frames ≈ 213 BPM (retuned, see 11.1)
     BeatMaxPeriod       = 49  // frames ≈ 49 BPM
-    BeatRefractoryFrames = 8  // ~125 ms between onsets
+    BeatRefractoryFrames = 15 // ~234 ms between onsets (retuned, see 11.1)
     LockCount           = 12  // onset support required for lock
     SilenceDiv          = 64  // linear peak-hold leak for silence detection
     LoudDecay           = 7
     LoudMinFloor        = 1 << 12
 )
 ```
+
+### 11.1 True 16 kHz and the frame-rate retune
+
+The first release never actually sampled at 16 kHz, so everything before this
+subsection describes a machine running 1.82x slower than its constants
+assume. The ADC runs 32× oversampled (~461 ADC cycles ≈ 110 µs per sample)
+but the MSI Range 6 core clock only triggers it every 62.5 µs, so every other
+trigger was dropped: the real `fs` was **8.8 kSPS**, frames lasted 28.4 ms,
+and the whole pipeline ran at ~35 fps. (Sync still worked — every device
+made the same mistake, and the agreement is relative — but frame-unit
+constants tuned by reasoning about 64 fps were quietly mis-calibrated.)
+
+Sync mode now runs from **HSI16 at exactly 16 MHz** — voltage range 1 (1.8 V
+regulator scale), one flash wait state, ADCPRE = AHB/2 (ADCCLK 8 MHz; /1
+exceeds the 14 MHz ADC limit, /4 is too slow to catch the triggers), TIM22
+PSC=499/ARR=1 → fs = 16 MHz/(2·500) = 16,000 Hz exactly, 64 fps for real.
+This costs regulator current: accepted for now (the sync demo runs from the
+bench supply; a battery revisit may cap sync-mode run time or drop back to
+MSI Range 8 @ 8.4 MHz, which needs its own retune).
+
+At 64 fps the frame-unit constants stop being equivalent (they were
+calibrated against the accidental 35 fps):
+
+```go
+BeatMinPeriod        = 18     // was 10 — at 64 fps 10 frames is 426 BPM, so
+                              // hat-rate intervals voted and won: confident
+                              // double-time locks (274–349 "BPM") on 143 BPM
+                              // music
+BeatRefractoryFrames = 15     // was 8 — 8 frames let open hats 13–14 frames
+                              // after a kick pass as separate onsets
+LockCount            = 12     // unchanged; weights are relative to it
+```
+
+Two pipeline changes came with it, both measured against ground truth:
+
+* **Flux is a 2-frame delta** (`total - prevTotal2`). A kick attack rises over
+  2–3 frames at 64 fps; a 1-frame delta crosses threshold on whichever frame
+  it happens to cross, so consecutive kick intervals scattered 18–36 frames
+  for one constant tempo and the histogram never reached `LockCount`. At the
+  old 8.8 kSPS one frame already spanned the attack — the old behavior was
+  the 2-frame window by accident.
+* **Vote tolerance + half-rate decay.** Each onset votes `interval ±1/±2`
+  (weights 4/2/1) to bridge the residual scatter, and the histogram decays
+  every *other* onset: the evidence budget per second is set by the onset
+  rate (~2.5/s), not the frame rate, so per-onset decay halved the effective
+  horizon when the frame rate doubled.
+
+Ground-truth BPM for tuning came from the host, not the ear: scipy butter
+LP 200 Hz → 100 Hz envelope → flux → autocorrelation peak in 100–180 BPM.
+The test EDM segments at 45/120/600 s = 142.9 BPM, at 300 s = 153.8 BPM. The
+pipeline is pure integer Go, so `tools/hostbeat` and
+`syncdsp/replay_debug_test.go` (`HOSTBEAT=/tmp/seg.wav go test -v -run
+TestReplayWav ./syncdsp/`) replay real audio through the exact firmware code
+— tuning loops run there at seconds per iteration. On the device,
+`tools/telem.py` (against the `debug-beat-tracking` branch, which carries the
+RAM telemetry ring this build omits) reads the live pipeline state over SWD
+without halting the CPU; `tools/exp.sh` sweeps one const through
+test+build+flash.
+
+Verified before merging: host replay locks at period 25 on the 143 BPM
+segment; the same pipeline on the device, through bench speakers, locked
+756/756 frames at 62.9 fps with the exact onset count of the host replay —
+confirming the host/device bit-identity that makes the host loop valid.

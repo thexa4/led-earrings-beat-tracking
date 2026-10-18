@@ -207,13 +207,18 @@ const (
 	WarmupFrames = 64
 
 	// BeatMinPeriod and BeatMaxPeriod bound the beat period search, in
-	// analysis frames (15.6 ms each): 10 frames ≈ 240 BPM, 49 frames ≈ 49
-	// BPM. EDM is far inside this.
-	BeatMinPeriod = 10
+	// analysis frames (15.6 ms at the true 64 fps frame rate): 18 frames
+	// ≈ 213 BPM, 49 frames ≈ 49 BPM. EDM is far inside this. The floor
+	// used to be 10 (≈ 426 BPM at 64 fps) from the 8.8 kSPS era; at the
+	// real frame rate it admitted hat-rate intervals, which voted and won:
+	// confident double-time locks (274-349 BPM) on 143 BPM music.
+	BeatMinPeriod = 18
 	BeatMaxPeriod = 49
 
-	// BeatRefractoryFrames: minimum spacing between onsets (~125 ms).
-	BeatRefractoryFrames = 8
+	// BeatRefractoryFrames: minimum spacing between onsets (~234 ms).
+	// Was 8 (~125 ms), which let open hats 13-14 frames after a kick
+	// register as separate onsets at 64 fps.
+	BeatRefractoryFrames = 15
 
 	// LockCount is how many interval-histogram votes are needed before the
 	// beat tracker claims lock.
