@@ -17,11 +17,17 @@ fi
 name=$1
 value=$2
 
-if ! grep -qE "^\t${name} = " syncdsp/consts.go; then
-	echo "$0: ${name} not a tunable in syncdsp/consts.go" >&2
+# grep -E does not interpret \t, and the comment after the value must
+# survive the rewrite - only the integer is replaced.
+if ! grep -qE "^[[:space:]]*${name}[[:space:]]*=[[:space:]]*[0-9]+([[:space:]]|$)" syncdsp/consts.go; then
+	echo "$0: ${name} not an integer tunable in syncdsp/consts.go" >&2
 	exit 1
 fi
-sed -i -E "s/^(\t${name}) = .*/\1 = ${value}/" syncdsp/consts.go
+sed -i -E "s/^([[:space:]]*${name}[[:space:]]*=[[:space:]]*)[0-9]+/\1${value}/" syncdsp/consts.go
+if ! grep -qE "^[[:space:]]*${name}[[:space:]]*=[[:space:]]*${value}([[:space:]]|$)" syncdsp/consts.go; then
+	echo "$0: rewrite of ${name} did not take" >&2
+	exit 1
+fi
 echo "== ${name} = ${value}"
 
 # Host tests first: a parameter that breaks bit-identical agreement between
