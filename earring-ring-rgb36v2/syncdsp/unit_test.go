@@ -402,7 +402,7 @@ func TestHashEntropy(t *testing.T) {
 		}
 		// "Steady" = not within 2 smoothing constants of any identity change,
 		// and past warmup: the hash has settled into its section value.
-		if f >= WarmupFrames && framesSinceChange > 2*1<<SmoothShift {
+		if f >= int(WarmupFrames) && framesSinceChange > 2*1<<SmoothShift {
 			steady++
 			if id == prev {
 				steadySame++

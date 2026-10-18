@@ -651,3 +651,63 @@ const (
     LoudMinFloor        = 1 << 12
 )
 ```
+
+### 11.1 The debug branch: true 16 kHz and the frame-rate retune
+
+The block above is master, and master never actually sampled at 16 kHz. The
+ADC runs 32× oversampled (~461 ADC cycles ≈ 110 µs per sample) but the MSI
+Range 6 core clock only triggers it every 62.5 µs, so every other trigger was
+dropped: the real `fs` was **8.8 kSPS**, frames lasted 28.4 ms, and the whole
+pipeline ran at ~35 fps while every constant was reasoned about at 64 fps.
+Measured, not guessed: telemetry frame rate under OpenOCD.
+
+`debug-beat-tracking` moves the sync path to **HSI16 @ 16 MHz** — voltage
+range 1 (1.8 V regulator scale), one flash wait state, ADCPRE = AHB/2 (ADCCLK
+8 MHz; /1 exceeds the 14 MHz ADC limit, /4 is too slow to catch the triggers),
+TIM22 PSC=499/ARR=1 → fs = 16 MHz/(2·500) = 16,000 Hz exactly, 64 fps for
+real. This costs regulator current and is fine on the bench; the direction is
+for **master to move to the higher clock too**, so the constants below are the
+retuned ones, not a parallel tuning.
+
+At 64 fps the frame-unit constants stop being equivalent (they were
+calibrated against the accidental 35 fps):
+
+```go
+SampleRate           = 16000  // exact; was 15997 (nominal)
+BeatMinPeriod        = 18     // was 10 — at 64 fps 10 frames is 426 BPM, so
+                              // hat-rate intervals voted and won: confident
+                              // double-time locks (274–349 "BPM") on 143 BPM
+                              // music
+BeatRefractoryFrames = 15     // was 8 — 8 frames let open hats 13–14 frames
+                              // after a kick pass as separate onsets
+LockCount            = 12     // unchanged; weights are relative to it
+```
+
+Two pipeline changes came with it, both measured against ground truth:
+
+* **Flux is a 2-frame delta** (`total - prevTotal2`). A kick attack rises over
+  2–3 frames at 64 fps; a 1-frame delta crosses threshold on whichever frame
+  it happens to cross, so consecutive kick intervals scattered 18–36 frames
+  for one constant tempo and the histogram never reached `LockCount`. At the
+  old 8.8 kSPS one frame already spanned the attack — the old behavior was
+  the 2-frame window by accident.
+* **Vote tolerance + half-rate decay.** Each onset votes `interval ±1/±2`
+  (weights 4/2/1) to bridge the residual scatter, and the histogram decays
+  every *other* onset: the evidence budget per second is set by the onset
+  rate (~2.5/s), not the frame rate, so per-onset decay halved the effective
+  horizon when the frame rate doubled.
+
+Ground-truth BPM for tuning came from the host, not the ear: scipy butter
+LP 200 Hz → 100 Hz envelope → flux → autocorrelation peak in 100–180 BPM.
+`podcast.mp3` segments at 45/120/600 s = 142.9 BPM, 300 s = 153.8 BPM. The
+pipeline is pure integer Go, so `tools/hostbeat` and
+`syncdsp/replay_debug_test.go` (`HOSTBEAT=/tmp/seg.wav go test -v -run
+TestReplayWav ./syncdsp/`) replay real audio through the exact firmware code
+— tuning loops run there, and the device confirms afterward over telemetry
+(RAM ring at `syncdsp.Telem`, read via `tools/telem.py` against a persistent
+OpenOCD telnet server; RAM reads don't halt the CPU).
+
+Device check after the retune (segment 120 s through the bench speakers):
+62.9 fps, locked 756/756 frames, 29 onsets — exactly the host replay's onset
+count — beat spacing clustered at the true tempo instead of the old
+double-time period-10 lock.

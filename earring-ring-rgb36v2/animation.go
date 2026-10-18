@@ -22,7 +22,6 @@ const (
 	modeSparkle
 	modeVUMeter
 	modeCustom0
-	modeCustom1
 	modeSync
 	modeLast
 
@@ -44,7 +43,6 @@ const variantsPerMode = "\x03" + // modeTrace
 	"\x04" + // modeSparkle (numSparkleVariants)
 	"\x0d" + // modeVUMeter (numStaticColors)
 	"\x00" + // modeCustom0: capped by the pattern itself
-	"\x00" + // modeCustom1: ditto
 	"\x01" + // modeSync: the pattern is chosen by the music, not the user
 	"\x00" + // modeLast (not a mode)
 	"\x00" + // modeTest
@@ -53,7 +51,7 @@ const variantsPerMode = "\x03" + // modeTrace
 // Cycle to the next variant within a mode.
 func animationNextVariant(mode, variant int) int {
 	variant++
-	if mode == modeCustom0 || mode == modeCustom1 {
+	if mode == modeCustom0 {
 		// Custom modes have their variant defined in the program itself.
 		if variant > customPattern.MaxVariant() {
 			variant = 0
@@ -87,8 +85,6 @@ func animate(mode, variant, led, frame int) Color {
 		return makeSparkle(led, frame, variant)
 	case modeCustom0:
 		return showCustom(led, frame, variant, 0)
-	case modeCustom1:
-		return showCustom(led, frame, variant, 1)
 	case modeSync:
 		return syncAnimate(led)
 	case modeTest:
@@ -131,8 +127,6 @@ func newFrame(mode, variant, frame int) {
 		sparkleNextFrame(variant)
 	case modeCustom0:
 		customNextFrame(frame, variant)
-	case modeCustom1:
-		customNextFrame(frame, variant)
 	case modeQA:
 		customNextFrame(frame, variant)
 	}
@@ -144,8 +138,6 @@ func initMode(mode int) {
 	switch mode {
 	case modeCustom0:
 		customLoadPattern(0, true)
-	case modeCustom1:
-		customLoadPattern(1, true)
 	}
 }
 

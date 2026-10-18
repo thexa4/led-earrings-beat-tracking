@@ -209,11 +209,11 @@ const (
 	// BeatMinPeriod and BeatMaxPeriod bound the beat period search, in
 	// analysis frames (15.6 ms each): 10 frames ≈ 240 BPM, 49 frames ≈ 49
 	// BPM. EDM is far inside this.
-	BeatMinPeriod = 10
+	BeatMinPeriod = 18
 	BeatMaxPeriod = 49
 
 	// BeatRefractoryFrames: minimum spacing between onsets (~125 ms).
-	BeatRefractoryFrames = 8
+	BeatRefractoryFrames = 15
 
 	// LockCount is how many interval-histogram votes are needed before the
 	// beat tracker claims lock.

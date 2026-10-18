@@ -5,26 +5,35 @@ package main
 // package (host-tested); this file is the device plumbing: capture setup,
 // non-blocking sample feeding, and the animation state.
 //
-// Clock/ADC setup is deliberately a near-copy of the capture half of
-// dataRecv() (see startSyncCapture): that configuration is proven to sample
-// accurately at 4.2 MHz with the ADC on HSI16 and 32x oversampling. The only
-// differences: LEDs stay on (this mode is the LEDs), the DMA buffer is one
-// 250-sample analysis window instead of two symbol windows, and the timer
-// prescaler gives 15,997 Hz to match syncdsp.SampleRate.
+// Clock/ADC setup follows the capture half of dataRecv() (that
+// configuration is proven with 32x oversampling) but runs the CPU from HSI16
+// at 16 MHz instead of MSI at 4.2 MHz: measured over SWD, the feed DSP
+// saturates the core at 4.2 MHz (~475 cycles/sample incl. bit-bang and
+// animation), so there the ADC free-runs at ~8.8 kSPS with every other
+// trigger dropped and a "15.6 ms" analysis frame is really 28.4 ms - which
+// is fine in the field (master, every device agrees), but it makes the frame
+// constants in syncdsp 1.82x off their documented wall time. At 16 MHz the
+// 62.5 us sample period is real: TIM22 divides down to exactly 16 kHz and
+// the ADC runs synchronously from PCLK. (16 MHz needs voltage range 1, which
+// costs battery current - accepted, and master is intended to move to this
+// clock too; frame-unit constants in syncdsp are being retuned for the true
+// 64 fps frame rate on this branch.)
 //
-// Running at 4.2 MHz has two consequences the loop structure must respect:
+// Running above the idle clock has two consequences the loop structure must
+// respect:
 //
-//   - The bit-bang multiplexer is cycle-counted, so a full refresh gets ~16x
-//     faster. That is harmless for the LEDs (same duty, just higher rate),
-//     but animations driven by the main loop's frame counter would run 16x
-//     too fast too. So sync mode ignores that counter: syncAnimate reads
-//     syncAnimFrame, which advances once per analysis frame (16 Hz) instead.
+//   - The bit-bang multiplexer is cycle-counted, so a full refresh runs 4x
+//     faster. That is harmless for the LEDs (relative duties are cycle
+//     ratios, and the refresh only gets less flickery), but animations
+//     driven by the main loop's frame counter would speed up too. So sync
+//     mode ignores that counter: syncAnimate reads syncAnimFrame, which
+//     advances once per analysis frame instead.
 //
-//   - A full pipeline frame takes ~20k cycles (~5 ms). Running that in one
-//     burst would freeze the multiplexer that long, holding one LED group on
-//     visibly. So samples are fed incrementally: each main-loop iteration
-//     hands the pipeline whatever the DMA has written since the last
-//     iteration (bounded burst), and only the frame *boundary* work
+//   - A full pipeline frame takes ~20k cycles (~1.3 ms at 16 MHz). Running
+//     that in one burst would freeze the multiplexer that long, holding one
+//     LED group on visibly. So samples are fed incrementally: each main-loop
+//     iteration hands the pipeline whatever the DMA has written since the
+//     last iteration (bounded burst), and only the frame *boundary* work
 //     (log2/hash/beat/decide, ~2k cycles) runs at once.
 
 import (
@@ -39,15 +48,16 @@ const (
 	// Analysis window in samples: one DMA buffer, one pipeline frame.
 	syncWindowSize = syncdsp.Window
 
-	// TIM22 prescaler: fs = 4.194304 MHz / (2 * (syncPSC+1)) = 15996.6 Hz,
-	// matching syncdsp.SampleRate to within 0.02%.
-	syncPSC = 130
+	// TIM22 prescaler: fs = 16 MHz / (2 * (syncPSC+1)) = exactly 16000 Hz
+	// (PCLK = HSI16, see startSync; the old 4.194 MHz / 2*131 setup produced
+	// 15996.6 Hz on paper but 8.8 kSPS in practice - see the file comment).
+	syncPSC = 499
 
-	// Maximum samples fed to the pipeline per main-loop iteration. At the
-	// ~4.2 MHz loop rate iterations arrive far more often than samples do
-	// (~6 needed, ~4.2 MHz / 1.5k cycles per iteration), so this cap only
-	// limits catch-up after a stall; 24 samples ≈ 1.6k cycles ≈ one refresh
-	// period, which is invisible.
+	// Maximum samples fed to the pipeline per main-loop iteration. At 16 MHz
+	// and 16 kSPS the loop needs ~16000/loop-rate ≈ 11 samples per iteration,
+	// so this cap only limits catch-up bursts (24 samples ≈ 1.6k cycles ≈ one
+	// refresh period, which is invisible). At 4.2 MHz it *was* the steady
+	// state (24 × ~370 Hz ≈ the 8.8 kSPS the starved CPU managed).
 	syncFeedCap = 24
 )
 
@@ -88,15 +98,38 @@ func startSync() {
 	syncFed = 0
 	syncRunning = true
 
-	// Enable HSI16: the ADC runs from it (CKMODE=0, the reset value, selects
-	// HSI16 - the same configuration dataRecv() uses, with the same reason:
-	// 32x oversampling needs a fast ADC clock independent of the system clock).
-	stm32.RCC.CR.SetBits(stm32.RCC_CR_HSI16ON)
-
-	// System clock: MSI range 6 (4.2 MHz), like dataRecv(). This is what
-	// makes TIM22 (PCLK domain) count fast enough for 16 kSPS and gives the
-	// DSP its cycle budget.
-	stm32.RCC.SetICSCR_MSIRANGE(stm32.RCC_ICSCR_MSIRANGE_Range6)
+	// System clock: HSI16 (exactly 16 MHz), so PCLK is 16 MHz for TIM22 and
+	// the ADC (which runs synchronously from PCLK via CKMODE=0; note that
+	// 0 does *not* select HSI16 async as the old comment here believed - the
+	// measured 8.8 kSPS at MSI Range6 proves it).
+	//
+	// 16 MHz needs voltage range 1 (the idle config runs range 3, whose spec
+	// maximum of 2 MHz sync at 4.2 MHz was already quietly over). Order: raise
+	// the scale and wait for the regulator (VOSF clears when ready), give the
+	// flash its wait state, then switch over. Power is the bench supply here;
+	// this trade is not for battery firmware.
+	// TinyGo's device/stm32 masks for this part are already shifted into
+	// place (HSI16ON_Msk=0x1 at Pos 0, HSI16RDYF_Msk=0x4 at Pos 2): use them
+	// directly - shifting again by _Pos points at the wrong bit.
+	stm32.RCC.CR.SetBits(stm32.RCC_CR_HSI16ON_Msk)
+	for stm32.RCC.CR.Get()&stm32.RCC_CR_HSI16RDYF_Msk == 0 {
+	}
+	stm32.RCC.APB1ENR.SetBits(stm32.RCC_APB1ENR_PWREN_Msk)
+	stm32.PWR.CR.ReplaceBits(stm32.PWR_CR_VOS_V1_8, stm32.PWR_CR_VOS_Msk,
+		stm32.PWR_CR_VOS_Pos)
+	waitForVOS()
+	stm32.RCC.APB1ENR.ClearBits(stm32.RCC_APB1ENR_PWREN_Msk)
+	stm32.FLASH.SetACR_LATENCY(stm32.Flash_ACR_LATENCY_WS1)
+	stm32.RCC.CFGR.ReplaceBits(stm32.RCC_CFGR_SW_HSI16, stm32.RCC_CFGR_SW_Msk, 0)
+	// SWS is the SW field at bits 3:2: shift the constant, or the comparison
+	// against the masked register is never true - LLVM proves that and marks
+	// everything after the loop unreachable, silently dropping the rest of
+	// the program (measured: a 30 KB firmware links to 4 KB, no warning).
+	// If this loop ever appears to hang, suspect the SWD read path first:
+	// CFGR has been observed to read back 0 over the debug probe while the
+	// core demonstrably ran from HSI16 at the full 16 MHz.
+	for stm32.RCC.CFGR.Get()&stm32.RCC_CFGR_SWS_Msk != (stm32.RCC_CFGR_SWS_HSI16 << 2) {
+	}
 
 	// Power on microphone.
 	micPin.Configure(machine.PinConfig{Mode: machine.PinOutput})
@@ -116,7 +149,7 @@ func startSync() {
 	stm32.ADC.CHSELR.Set(1 << 8)
 
 	// TIM22 triggers the ADC at fs; ARR=1 so the update event (TRGO) happens
-	// every other PCLK: fs = 4.194 MHz / (2 * (PSC+1)).
+	// every other PCLK: fs = 16 MHz / (2 * (PSC+1)).
 	stm32.RCC.SetAPB2ENR_TIM22EN(1)
 	stm32.TIM22.PSC.Set(syncPSC)
 	stm32.TIM22.ARR.Set(1)
@@ -138,22 +171,51 @@ func startSync() {
 
 	// ADC: continuous DMA, one transfer per TIM22 trigger, 32x oversampling
 	// with a 1-bit shift (same as dataRecv): resolution + noise shaping for
-	// free, and each trigger's 32 sub-conversions take ~28 µs of HSI16 -
-	// well inside the 62.5 µs sample period.
+	// free. Each trigger's sub-conversions take ~461 ADC cycles (measured),
+	// which at the 8 MHz ADC clock below is ≈ 58 µs - inside the 62.5 µs
+	// sample period, so no trigger is missed (at the old 4.19 MHz PCLK and
+	// ADCPRE=1 they took ~110 µs, which is exactly where the 8.8 kSPS came
+	// from).
 	stm32.ADC.CFGR1.Set(stm32.ADC_CFGR1_DMAEN | stm32.ADC_CFGR1_DMACFG |
 		stm32.ADC_CFGR1_EXTSEL_TIM22_TRGO<<stm32.ADC_CFGR1_EXTSEL_Pos |
 		stm32.ADC_CFGR1_EXTEN_RisingEdge<<stm32.ADC_CFGR1_EXTEN_Pos)
 	// Full Set (not SetBits) with CKMODE left at 0: a preceding mic mode
 	// configures the ADC on PCLK with low-frequency mode, and that would
 	// both starve the 32x oversampling and mis-clock the conversions.
-	// Clear CCR the same way (LFMEN off at 4.2 MHz system clock).
 	stm32.ADC.CFGR2.Set(0 |
 		stm32.ADC_CFGR2_OVSE |
 		1<<stm32.ADC_CFGR2_OVSS_Pos |
 		stm32.ADC_CFGR2_OVSR_Mul32<<stm32.ADC_CFGR2_OVSR_Pos)
-	stm32.ADC.CCR.Set(0)
+	// CCR: ADCPRE = AHB/2 (bits 29:28; TinyGo's device/stm32 has no constant
+	// for this part), everything else zero (LFMEN off). The divider matters
+	// now that PCLK is 16 MHz: the datasheet caps the ADC clock at 14 MHz, so
+	// /1 would run it 14% over spec, while /4 (115 µs per trigger) would miss
+	// triggers. /2 is the only setting that is both in spec and fast enough.
+	stm32.ADC.CCR.Set(1 << 28)
 
 	stm32.ADC.CR.Set(stm32.ADC_CR_ADEN | stm32.ADC_CR_ADSTART)
+}
+
+// waitForVOS waits for the power regulator to finish the voltage-scale switch
+// started by the write to PWR_CR.VOS. VOSF means "switching": the hardware
+// sets it while the regulator moves and clears it when the new scale is
+// reached - so the only correct wait is "until it reads 0", bounded (a switch
+// takes tens of us; the bound is orders of magnitude above that even at the
+// idle clock).
+//
+// An earlier version here waited for VOSF to *rise* first, on a misreading of
+// the RM ("set while switching" taken as "will set on the write"). The
+// regulator often finishes before software samples the bit - it never
+// observes the rise then, and on a switch that sets nothing the loop hung
+// forever (measured: CFGR never written, magic never written; LLVM also
+// dropped the loop's iteration bound because the exit was data-dependent on
+// a register it cannot prove changes). Bound the loop *and* wait for the
+// settled level.
+//
+//go:noinline
+func waitForVOS() {
+	for i := 0; i < 100000 && stm32.PWR.CSR.Get()&stm32.PWR_CSR_VOSF_Msk != 0; i++ {
+	}
 }
 
 // stopSync tears down everything startSync turned on, restoring the low-power
@@ -182,11 +244,24 @@ func stopSync() {
 	// Power off microphone.
 	micPin.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
 
+	// Back to the animation clock: switch to MSI first (still Range2, the
+	// idle speed - startSync no longer retunes MSI), then it is legal to drop
+	// the voltage scale again; the flash latency can go either way but WS0
+	// matches the idle config. Order mirrors the power-up half in reverse.
+	stm32.RCC.CFGR.ReplaceBits(stm32.RCC_CFGR_SW_MSI, stm32.RCC_CFGR_SW_Msk, 0)
+	// (MSI is field value 0, so the SWS mask/constant mismatch noted above
+	// cannot bite here.)
+	for stm32.RCC.CFGR.Get()&stm32.RCC_CFGR_SWS_Msk != stm32.RCC_CFGR_SWS_MSI {
+	}
+	stm32.FLASH.SetACR_LATENCY(stm32.Flash_ACR_LATENCY_WS0)
+	stm32.RCC.APB1ENR.SetBits(stm32.RCC_APB1ENR_PWREN)
+	stm32.PWR.CR.ReplaceBits(stm32.PWR_CR_VOS_V1_2, stm32.PWR_CR_VOS_Msk,
+		stm32.PWR_CR_VOS_Pos)
+	waitForVOS()
+	stm32.RCC.APB1ENR.ClearBits(stm32.RCC_APB1ENR_PWREN)
+
 	// Disable HSI16 (nothing else uses it; dataRecv does the same on exit).
 	stm32.RCC.CR.ClearBits(stm32.RCC_CR_HSI16ON)
-
-	// Back to the animation clock.
-	stm32.RCC.SetICSCR_MSIRANGE(defaultMSIRANGE)
 }
 
 // syncPoll consumes everything the DMA has written since the last call and
@@ -202,7 +277,7 @@ func syncPoll() {
 		write = 0 // NDTR==0: the last write was the final slot
 	}
 
-	// Samples available without lapping the writer. The producer adds ~6 per
+	// Samples available without lapping the writer. The producer adds ~11 per
 	// iteration and never runs ahead of the buffer, so this difference is
 	// always the true backlog; syncFeedCap bounds the burst.
 	avail := (write - syncRead + syncWindowSize) % syncWindowSize

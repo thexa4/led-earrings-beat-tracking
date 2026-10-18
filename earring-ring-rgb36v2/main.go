@@ -24,12 +24,15 @@ func main() {
 
 	index := 0 // 0..11, group of 3 LEDs that will be updated together
 	frame := 0
-	mode := int(storedState[stateOffsetMode])
-	// modeCustom2 was removed; state saved by old firmware may contain a now
-	// invalid mode (10 used to be custom2, 14 used to be QA).
-	if mode >= modeLast && mode != modeTest && mode != modeQA {
-		mode = 0
-		storedState[stateOffsetMode] = 0
+	// Debug build: always start in sync mode, so the pipeline runs from the
+	// first second without needing anyone to press a button. The QA self-test
+	// is sticky in the state page (loadState sets it on first use), so clear
+	// it there too - in QA mode the DSP would idle and the telemetry ring
+	// would stay empty.
+	mode := modeSync
+	if int(storedState[stateOffsetMode]) != mode {
+		storedState[stateOffsetMode] = uint8(mode)
+		saveState()
 	}
 	variant := 0
 	if mode < len(modeVariants) {
@@ -162,7 +165,9 @@ func main() {
 				}
 				if variantBtnFramesPressed == 30 {
 					slot := mode - modeCustom0
-					if slot >= 0 && slot < 2 {
+					// Debug build: one pattern slot. The second one's flash
+					// region was traded for the beat-tracking telemetry.
+					if slot >= 0 && slot < 1 {
 						// Long press is to receive data, not to switch to the
 						// next variant.
 						variantBtnFramesPressed = 0
