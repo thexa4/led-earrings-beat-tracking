@@ -17,12 +17,16 @@ package syncdsp
 
 // Events reports what happened in the most recent processed frame.
 type Events struct {
-	Hash           uint32
-	HashAge        int32 // frames since Hash was last recomputed (0 = this frame)
-	Onset          bool  // spectral flux onset this frame
-	Beat           bool  // beat boundary this frame
-	Bar            bool  // bar boundary this frame
-	Anchor         bool  // transition anchor: reset to base pattern
+	Hash     uint32
+	HashAge  int32 // frames since Hash was last recomputed (0 = this frame)
+	Onset    bool  // spectral flux onset this frame
+	Beat     bool  // beat boundary this frame
+	Bar      bool  // bar boundary this frame
+	Anchor   bool  // transition anchor: reset to base pattern
+	Returned bool  // periodicity confirmation: this section is one the
+	// ring already holds at a bar-multiple lag (see decide). Reported because it
+	// is the event that re-aligns two devices that drifted, and - unlike the
+	// anchor - it fires often enough to measure.
 	Pattern        int32
 	PatternChanged bool
 	Locked         bool // beat tracker has lock
@@ -57,6 +61,17 @@ type Pipeline struct {
 	// Raw per-band energies for the frame being processed.
 	energies [NBands]uint32
 
+	// Input normalization (see feed and agcUpdate; AgcTargetPeak carries the
+	// measurement that motivated it). Deliberately *outside* the hash's
+	// relative design: the gain is a power of two, so it moves every band's
+	// log2 energy by the same constant, which the shape comparisons cancel.
+	//   agcPeak   peak-hold of the bank's per-frame DC-blocked peak
+	//   agcShift  applied gain in bits, mirrored into filters.gainShift
+	//   agcHold   frames until the next gain increase is allowed
+	agcPeak  int32
+	agcShift int32
+	agcHold  int32
+
 	// Frame-level loudness tracking, used for the onset detector, the anchor
 	// energy gate and silence detection:
 	//   total     sum of per-band log2 energies (Q8)
@@ -66,13 +81,38 @@ type Pipeline struct {
 	prevTotal  int32
 	prevTotal2 int32 // onset flux runs over two frames, see onsetDetect
 	fluxFloor  int32
-	level      int32
-	linPeak    int32
-	onsetAge   int32 // frames since the last onset (100 = long ago)
-	silent     bool  // far quieter than the recent peak: leave things alone
+
+	// Bass-only flux detector, the beat tracker's input. Same shape as the
+	// one above, run on the bottom band (below 250 Hz) instead of the full
+	// spectrum. Measured against the played file on the host replay: the
+	// full-spectrum onset lands within 2 frames of the true beat grid 28% of
+	// the time, which is barely better than chance (18% for +-2 of 27) - it
+	// fires on vocal consonants, guitar picks and hats, and the beat tracker
+	// then locks to whatever periodicity that soup happens to have (period 19
+	// on a 142 BPM track). The bottom band is the kick, which is the beat.
+	prevBass       int32
+	prevBass2      int32
+	bassFloor      int32
+	bassOnset      bool // debug: this frame's bass onset, for the replay trace
+	level          int32
+	linPeak        int32
+	onsetAge       int32 // frames since the last onset (100 = long ago)
+	lastOnsetFrame int32 // frame of the last full-spectrum onset (refractory)
+	silent         bool  // far quieter than the recent peak: leave things alone
 
 	// Beat tracker.
 	beat BeatTracker
+
+	// Tempo scan: a ring of the recent frame envelope, correlated against
+	// itself to find the tempo. See tempoScan.
+	env     [TempoWindow]int8
+	envHead int32 // frames pushed so far; slot = envHead & EnvMask
+	envRef  int32 // slow baseline subtracted before quantising
+	// envSum and envSq are the ring's running sum and sum of squares, kept
+	// current one element at a time by pushEnv. |value| <= 128 so both fit
+	// comfortably in int32 (256 * 128 * 128 = 4.2M).
+	envSum int32
+	envSq  int32
 
 	// Beat-indexed hash ring. Indexed by beat counter, never by wall clock:
 	// see PARTY-SYNC.md §D3.
@@ -119,6 +159,11 @@ type Pipeline struct {
 func (p *Pipeline) Init() {
 	*p = Pipeline{}
 	p.filters.reset()
+	// Start at maximum gain: the tracker gives gain back slowly but takes it
+	// away instantly, so a device that boots in a quiet room is ready for the
+	// first drop without pumping. See agcUpdate.
+	p.agcShift = AgcMaxShift
+	p.filters.gainShift = p.agcShift
 }
 
 // Process runs one analysis frame of Window samples. It needs no scratch
@@ -126,27 +171,144 @@ func (p *Pipeline) Init() {
 // the ADC capture buffer directly.
 func (p *Pipeline) Process(raw []uint16) Events {
 	for _, v := range raw[:Window] {
-		p.filters.run((int32(v) - 1<<15) >> inputShift)
+		p.feed(v)
 	}
 	return p.endFrame()
+}
+
+// feed converts one raw ADC word and hands it to the filter bank, which does
+// the DC blocking and applies the frame's gain (bank.run). See AgcTargetPeak
+// for why that gain exists.
+//
+// There is deliberately no DC estimator here. An early version tracked the
+// microphone bias with a 0.5 s IIR and it broke the beat lock: at that time
+// constant the loop follows the *asymmetry of a kick waveform* - a bass-heavy
+// bar has a real local mean - so the estimate wanders a few hundred counts in
+// step with the music, and the subtraction modulates the bass band by an amount
+// comparable to a quiet passage's whole signal. The bank's 30 Hz blocker
+// removes the bias in ~30 ms and never looks at the music's envelope.
+func (p *Pipeline) feed(v uint16) {
+	p.filters.run(int32(v) - 1<<15)
+}
+
+// agcUpdate runs once per frame: fold this frame's input peak into a slow
+// peak-hold, then keep that hold inside [AgcLowPeak, AgcHighPeak] with a
+// power-of-two gain. The constants carry the measurements and the shape of the
+// band; the asymmetry is the other half of the design.
+//
+// Fall immediately, climb slowly, and stay put in between. A gain that is too
+// high clips on the next transient and is corrected the same frame; a gain that
+// is too low is silent, persistent, and changes the tempo the beat tracker
+// locks to. But a change is *also* a discontinuity that the two earrings hit on
+// different frames, so the band has to be wide enough that ordinary musical
+// dynamics never reach either edge - otherwise the cure is worse than the
+// disease, which an earlier single-threshold version demonstrated by scoring
+// worse on the agreement test than no AGC at all.
+//
+// Net effect: a quiet device is lifted into the range where the pipeline makes the
+// same decisions as a loud one, and once there it stops moving.
+func (p *Pipeline) agcUpdate() {
+	// Level measure: the frame's input swing in raw ADC counts. Peak-to-peak needs
+	// no DC estimate (the bias cancels in max-min), and taking it before the gain and
+	// the limiter means a loud input cannot hide behind a clipped sample - see
+	// bank.minX/maxX.
+	pk := p.filters.inputPeakPP()
+	if pk > p.agcPeak {
+		p.agcPeak = pk
+	} else {
+		p.agcPeak -= p.agcPeak >> AgcPeakDecay
+	}
+	prev := p.agcShift
+	post := scalePow(p.agcPeak, p.agcShift)
+	switch {
+	case post > AgcHighPeak:
+		// Straight to the largest gain that fits, not one bit a frame at a
+		// time: the loud passage is already here. The scan runs below zero
+		// because a device next to the PA needs real attenuation - see AgcMin-
+		// Shift for why that is worth the bits it costs.
+		want := int32(AgcMinShift)
+		for s := int32(AgcMaxShift); s >= int32(AgcMinShift); s-- {
+			if scalePow(p.agcPeak, s) <= AgcHighPeak {
+				want = s
+				break
+			}
+		}
+		if want != p.agcShift {
+			p.agcShift = want
+			p.agcHold = AgcHoldFrames
+		}
+	case post < AgcLowPeak && p.agcShift < AgcMaxShift:
+		if p.agcHold > 0 {
+			p.agcHold--
+		} else {
+			p.agcShift++
+			p.agcHold = AgcHoldFrames
+		}
+	}
+	p.filters.gainShift = p.agcShift
+
+	// Hide the step from everything downstream. The gain is a power of two, so
+	// in the log2 domain it is an exact constant: band energy m (a sum of
+	// magnitudes) scales by 2^delta, hence log2e(m) by exactly delta, i.e. 256
+	// per bit in Q8. Adding that to the log-domain state makes the step
+	// invisible to the hash (whose shape bits are already shift-invariant - see
+	// TestHashLevelInvariant), and to the onset detector, which otherwise sees
+	// the whole jump as flux: one bit of gain is 2304 counts of total against a
+	// threshold in the tens, i.e. a guaranteed false onset on every gain change,
+	// and a gain change is exactly the kind of moment the beat grid cannot
+	// afford.
+	if d := p.agcShift - prev; d != 0 {
+		// The ladder's own state is stored at the old gain, so a step leaves
+		// every rung one gain-factor away from its input and the poles chase
+		// that error over their own time constants (~10 samples for the bottom
+		// rung) as a transient the other earring does not have. Move the state
+		// with the gain and there is nothing to chase.
+		p.filters.rescaleGain(d)
+		off := d << 8
+		for i := range p.smooth {
+			p.smooth[i] += off
+			p.prevSmooth[i] += off
+			p.smoothSnap[i] += off
+		}
+		// total = maxE + sum(e): NBands+1 terms, each moved by off.
+		toff := off * (NBands + 1)
+		p.prevTotal += toff
+		p.prevTotal2 += toff
+		p.level += toff
+		// The bass detector runs on one band, so one offset.
+		p.prevBass += off
+		p.prevBass2 += off
+		// linPeak is a peak-hold of the *linear* sum, which scales with the
+		// gain directly. It is only ever compared against a linear sum of the
+		// same signal, so scaling it keeps the silence decision unchanged.
+		if d > 0 {
+			p.linPeak <<= uint(d)
+		} else {
+			p.linPeak >>= uint(-d)
+		}
+	}
 }
 
 // ProcessSample feeds a single sample, for a caller that is interrupted by the
 // ADC at sample rate and wants to spread the filter work between captures.
 // Call EndFrame every Window samples.
 func (p *Pipeline) ProcessSample(v uint16) {
-	p.filters.run((int32(v) - 1<<15) >> inputShift)
+	p.feed(v)
 }
 
 // EndFrame finishes a frame of Window samples fed via ProcessSample.
 func (p *Pipeline) EndFrame() Events { return p.endFrame() }
 
-// BeatPeriod exposes the locked beat period (frames) for host tools
-// (tools/hostbeat); it is unreferenced on the device and the linker drops it.
+// BeatPeriod exposes the locked beat period (frames): the sync-mode
+// visualization uses it to place the beat marker between beats, and host tools
+// to print the tracker state.
 func (p *Pipeline) BeatPeriod() int32 { return p.beat.Period }
 
 //go:noinline
 func (p *Pipeline) endFrame() Events {
+	// 0. Fold this frame's input peak into the gain tracker.
+	p.agcUpdate()
+
 	// 1. Fold this frame's band energies.
 	p.filters.fold(&p.energies)
 
@@ -195,6 +357,10 @@ func (p *Pipeline) endFrame() Events {
 	// deliberately carries no absolute level information, so it cannot be
 	// used for this).
 	onset := p.onsetDetect(total)
+
+	// 4b. The beat tracker's own onset: the same detector on the bottom band
+	// only. See the bassFloor field comment for the measurement.
+	p.bassOnset = p.onsetDetectBass(e[NBands-1])
 	if onset {
 		p.onsetAge = 0
 	} else if p.onsetAge < 100 {
@@ -279,9 +445,12 @@ func (p *Pipeline) endFrame() Events {
 		p.stableFrames = 0
 	}
 
-	// 6. Beat tracker: advance phase, fold in the onset, possibly emit a
-	// beat boundary.
-	beatBoundary, barBoundary := p.beat.Tick(onset, p.frame)
+	// 6. Beat tracker: advance phase, fold in the onset, possibly emit a beat
+	// boundary. Driven by the kick band, not the full-spectrum onset: see
+	// onsetDetectBass. Everything else in this function - the anchor, the
+	// energy gate, the pattern triggers - keeps reading the full-spectrum
+	// onset, because a section change is a broadband event.
+	beatBoundary, barBoundary := p.beat.Tick(p.bassOnset, p.frame)
 
 	// The events struct is state across frames, so it is rebuilt from scratch
 	// every frame: a stale Hash here once made every frame look identical.
@@ -333,10 +502,15 @@ func (p *Pipeline) endFrame() Events {
 		p.lastAnchorFrame = p.frame
 		p.lastAnchorHash = h
 		p.events.Anchor = true
-		p.beatsSincePattern = 0
 		// Snap the pattern to the new section immediately, ignoring the
 		// pattern refractory: this is the moment all the earrings are meant
-		// to realign on. Deliberately *not* resetting the beat counter: the
+		// to realign on. setPattern resets the refractory itself when the
+		// snap actually changes something; deliberately NOT zeroing it here
+		// unconditionally - measured, that starved the bar-driven re-read
+		// whenever anchors fired closer together than a bar (the tuned hash
+		// fires them at transitions *and* jitters across sections), so the
+		// pattern stopped tracking the music and cross-device agreement
+		// dropped from 82% to the 40s. Deliberately *not* resetting the beat counter: the
 		// ring is indexed by it, so zeroing it would shift this device's
 		// ring relative to the others' and "4 bars ago" would mean
 		// different music on each earring. The tracker's PLL already keeps
@@ -344,8 +518,214 @@ func (p *Pipeline) endFrame() Events {
 		p.setPattern(p.usePattern(&dev))
 	}
 
+	// 9. Tempo: every TempoStep frames, correlate the recent envelope against
+	// itself. This is what decides the period; the interval histogram above
+	// only provides the early beats before the ring is full.
+	p.pushEnv(total)
+	if p.frame%TempoStep == TempoStep-1 {
+		p.tempoScan()
+	}
+
 	p.frame++
 	return p.events
+}
+
+// pushEnv stores this frame's loudness in the tempo ring, relative to the
+// slow level so the stored value is a small deviation rather than a large
+// absolute level (and so a gain step does not show up as a modulation).
+//
+//go:noinline
+func (p *Pipeline) pushEnv(total int32) {
+	// envRef is deliberately slow (8 s, twice the ring itself). Subtracting a
+	// faster baseline - the level tracker's 1.6 s average, for the first try -
+	// high-passes the ring at a period close to the beat, which both eats the
+	// modulation and adds a strong short-lag correlation of its own: the scan
+	// then picks BeatMinPeriod on every sample. At 8 s the reference barely
+	// moves over one ring trip, and the residual DC is removed per window
+	// inside tempoScan.
+	if p.silent {
+		// Store a flat value rather than the silence cliff: a step from music to
+		// silence correlates at every lag and outranks any tempo.
+		total = p.envRef
+	}
+	if p.envHead == 0 {
+		// Start the baseline at the first sample rather than at zero, or the
+		// whole first trip around the ring saturates at +127 and the first scan
+		// - the one that decides the initial tempo - correlates a clipped square.
+		p.envRef = total
+	}
+	p.envRef += (total - p.envRef) >> 9
+	v := (total - p.envRef) >> 4
+	if v > 127 {
+		v = 127
+	} else if v < -128 {
+		v = -128
+	}
+	// The ring's sum and sum of squares are kept current here, two adds and two
+	// subtracts, so tempoScan needs no pass of its own to find the mean or the
+	// variance: expanding (v-mean)*(v'-mean) over the full ring leaves only the
+	// raw dot product in the inner loop.
+	old := int32(p.env[p.envHead&EnvMask])
+	p.envSum += v - old
+	p.envSq += v*v - old*old
+	p.env[p.envHead&EnvMask] = int8(v)
+	p.envHead++
+}
+
+// tempoScan picks the beat period from the loudness envelope and the beat phase
+// from the comb position that sits on the kicks. It is the reason the grid
+// matches the music at all.
+//
+// What it replaced cannot: the beat tracker used to vote on the intervals
+// between detected onsets, and those onsets are barely related to the kicks.
+// Measured against the played file (tools/onset_quality.py), pipeline onsets
+// land within two frames of the true beat grid 28% of the time, where a random
+// spike train scores 18%; a flux detector restricted to the bass band scores
+// 27%. Voting on such a series locks onto a periodicity of the detector, not of
+// the music - and it did so reproducibly: period 19-20 frames (200 BPM) on a
+// 142 BPM piece, on every device, at every level, while the earrings agreed
+// with each other and with nothing else in the room.
+//
+// The envelope does carry the beat. Correlated over TempoWindow it peaks at the
+// true lag; the per-window pick is right 57-61% of the time on the five real
+// samples, which is not good enough on its own, so each candidate's evidence is
+// accumulated across scans (TempoEvidenceShift) and the accumulated maximum is
+// what decides. That settles on the correct period on all five and stays there.
+//
+// Cost: 32 lags x TempoWindow products every TempoStep frames - an 8k-MAC burst
+// every 2 s - plus one division per candidate. Everything is int8 x int8 into an
+// int32 accumulator: 128*128*256 = 4.2M, no saturation, no float. The ring is
+// read in place; materialising a TempoWindow-entry int32 copy would cost 1 KB of
+// stack in a build whose whole stack is 1 KB.
+//
+// ringDot correlates the envelope ring against a rotated copy of itself:
+// sum(v[i]*v[i+lag]) around the whole ring. Circular rather than the one-sided
+// autocorrelation on purpose - it does not depend on where in the ring the
+// window starts, so the loops need neither a base offset nor a length that
+// varies with the lag, and the wrapped terms are 256 frames apart, far outside
+// any tempo. The two loops below are the two sides of that wrap; a single loop
+// with a mask inside measures the same thing and costs a compare in the hottest
+// place on a machine with no spare flash.
+//
+// Called three times per candidate lag - 96 calls every 2 s, so the call
+// overhead is noise, and one copy of the body is what keeps the scan affordable.
+//
+//go:noinline
+func (p *Pipeline) ringDot(lag int32) int32 {
+	sum := int32(0)
+	for i, v := range p.env[:TempoWindow-lag] {
+		sum += int32(v) * int32(p.env[i+int(lag)])
+	}
+	for i, v := range p.env[TempoWindow-lag:] {
+		sum += int32(v) * int32(p.env[i])
+	}
+	return sum
+}
+
+//go:noinline
+func (p *Pipeline) tempoScan() {
+	if p.envHead < TempoWindow {
+		// The first few seconds are a partial window: correlating a ring that is
+		// half zeros measures how fast the music started, not its tempo.
+		return
+	}
+	b := &p.beat
+	const nLag = BeatMaxPeriod - BeatMinPeriod + 1
+	mean0 := p.envSum / TempoWindow
+	// Expanding the mean-removed correlation over a full cycle of the ring
+	// cancels the two cross terms against the sum, and leaves a constant that is
+	// the same for every candidate lag:
+	//
+	//	sum((v[i]-m)*(v[i+l]-m)) = sum(v[i]*v[i+l]) - W*m*m
+	//
+	// so the inner loop below is a raw dot product of int8 values, and the
+	// variance is one multiply. On a machine with no hardware divide and a
+	// 1 KB stack this is what makes the scan cheap: no scratch array, no
+	// per-element subtraction, and the two halves of the wrapped ring are each a
+	// straight-line loop.
+	corr0 := mean0 * mean0 * TempoWindow
+	energy := p.envSq - corr0
+	if energy < TempoScale {
+		// A flat ring: nothing correlates with anything.
+		return
+	}
+	// Both score and energy are totals over the ring, so their ratio needs no
+	// per-lag normalisation - and the division is written as sm/(energy/scale)
+	// rather than sm*scale/energy because either total can reach 4.2M, and
+	// 4.2M*1024 does not fit in an int32.
+	// Correlation against a shifted copy of itself, over the full ring. Circular
+	// rather than the textbook one-sided autocorrelation on purpose: it is
+	// invariant to where in the ring the window happens to start, so the loops
+	// need neither a base offset nor a length that varies with the lag. The
+	// wrapped terms are 256 frames apart, far outside any tempo, and cost a
+	// little noise.
+	// The three candidates that go into each smoothed score roll through three
+	// variables rather than an array: filling one would be a second pass over
+	// every lag, and 128 bytes of stack in a build whose whole stack is 1 KB.
+	score0 := p.ringDot(BeatMinPeriod) - corr0
+	prev, cur := score0, score0
+
+	// Smooth over neighbouring lags - lag-1 and lag+1 are the same tempo to
+	// within a frame, and a knife-edge win on one bin over its neighbour is
+	// exactly the tie two devices would split - normalise by the envelope's own
+	// variance, and fold into the running evidence.
+	step := energy / TempoScale
+	best := 0
+	bestEv := int32(-1 << 30)
+	for k := 0; k < nLag; k++ {
+		// Three candidates roll through three variables rather than living in an
+		// array: 128 bytes of stack in a build that has 1 KB, for a pass that a
+		// rolling window does for free.
+		next := cur
+		if k+1 < nLag {
+			next = p.ringDot(BeatMinPeriod+1+int32(k)) - corr0
+		}
+		// Low-pass across neighbouring lags: lag-1 and lag+1 are the same tempo
+		// to within a frame, and a knife-edge win on one bin over its neighbour is
+		// exactly the tie two devices would split. (Tried replacing this with a
+		// second-difference comb 2cur-prev-next to cancel the weak-signal
+		// short-lag trend bias: on clean audio it collapsed the evidence (~18x)
+		// and mislocated the peak, 1800 lost lock and 2700 jumped to lag 46. The
+		// envelope is already a smooth loudness curve; differencing it into a
+		// spike train throws away the periodicity the scan depends on. REVERTED.)
+		sm := (prev + 2*cur + next) / 4
+		prev, cur = cur, next
+		q := sm / step
+		// |q| <= TempoScale by Cauchy-Schwarz - a correlation of a signal with a
+		// shifted copy of itself cannot exceed its own energy - so the evidence
+		// fits in an int16 with no clamp, and so does any average of it.
+		k1 := int32(b.ev[k])
+		if b.evInit {
+			k1 += (q - k1) >> TempoEvidenceShift
+		} else {
+			k1 = q
+		}
+		b.ev[k] = int16(k1)
+		if k1 > bestEv {
+			bestEv = k1
+			best = k
+		}
+	}
+	b.evInit = true
+	if bestEv < TempoMinEvidence {
+		// No tempo to be found: the music has no steady kick in this stretch.
+		// Say nothing rather than commit to a period that will be wrong for as
+		// long as it takes the accumulator to notice.
+		return
+	}
+	period := BeatMinPeriod + int32(best)
+	b.Period = period
+	if !b.Locked {
+		// Start the fresh grid at a beat; the phase-locked loop in Tick pulls it
+		// onto the kicks from here within a few beats. The earlier version set
+		// the phase by picking the loudest of the Period comb positions in the
+		// envelope, but measured against the device's own loudness that landed
+		// the beat on the loud frame no better than a fixed phase did (both
+		// ~chance), and cost a nested loop over the ring - the PLL tracking the
+		// onsets does the job for free.
+		b.phase = 0
+	}
+	b.Locked = true
 }
 
 // onsetDetect is a cheap flux detector on the log-domain frame total, with a
@@ -371,10 +751,37 @@ func (p *Pipeline) onsetDetect(total int32) bool {
 	p.fluxFloor += (absFlux - p.fluxFloor) >> 5
 
 	onset := false
-	if flux > p.fluxFloor+(p.fluxFloor>>1)+48 &&
+	if flux > p.fluxFloor+(p.fluxFloor>>1) &&
+		p.frame-p.lastOnsetFrame >= BeatRefractoryFrames {
+		onset = true
+		p.lastOnsetFrame = p.frame
+	}
+	return onset
+}
+
+// onsetDetectBass is onsetDetect for a single band: the kick band.
+//
+// Kept separate from onsetDetect rather than parameterised because the two
+// need different refractory references (the full-spectrum detector must not be
+// quieted by a kick, and vice versa) and the bass one never needs the silence
+// special case: a silent frame has no kick.
+//
+//go:noinline
+func (p *Pipeline) onsetDetectBass(bass int32) bool {
+	flux := bass - p.prevBass2
+	absFlux := flux
+	if absFlux < 0 {
+		absFlux = -absFlux
+	}
+	p.bassFloor += (absFlux - p.bassFloor) >> 5
+
+	onset := false
+	if flux > p.bassFloor+(p.bassFloor>>1) &&
 		p.frame-p.beat.lastOnset >= BeatRefractoryFrames {
 		onset = true
 	}
+	p.prevBass2 = p.prevBass
+	p.prevBass = bass
 	return onset
 }
 
@@ -398,6 +805,10 @@ func (p *Pipeline) decide(h uint32, barBeat bool, dev *[NBands]int32) {
 
 	// Periodicity confirmation - did the music come back around?
 	//
+	// Compared with sectionDist, so "the same music" means the same *section*
+	// (shape and hot fields); see that function for why the temporal field is
+	// excluded.
+	//
 	// Each nominal lag (2, 4, 8 bars) is searched over a window of
 	// ±LagTolerance beats rather than read at one exact index: two earrings
 	// count beats independently from their own lock points, so their ring
@@ -420,7 +831,7 @@ func (p *Pipeline) decide(h uint32, barBeat bool, dev *[NBands]int32) {
 					continue
 				}
 				prev := p.ring[(b.beat-lag)&(RingSize-1)]
-				if prev != 0 && hashDist(h, prev) <= DAccept {
+				if prev != 0 && ringDist(h, prev) <= DAccept {
 					returned = true
 					break
 				}
@@ -430,6 +841,8 @@ func (p *Pipeline) decide(h uint32, barBeat bool, dev *[NBands]int32) {
 			}
 		}
 	}
+
+	p.events.Returned = returned
 
 	// Store the current hash at the current beat.
 	p.ring[b.beat&(RingSize-1)] = h
@@ -470,8 +883,9 @@ func (p *Pipeline) setPattern(pat int32) {
 	p.events.Pattern = pat
 }
 
-// noveltyMin returns the minimum Hamming distance between h and the ring,
-// excluding the ring's leading run of matches: entries pushed since h's own
+// noveltyMin returns the minimum section distance (see sectionDist: identity
+// fields only) between h and the ring, excluding the ring's leading run of
+// matches: entries pushed since h's own
 // section settled are within DAccept of h by definition, and counting them
 // would drive novelty to zero in exactly the moment the anchor is meant to
 // fire. A ring that is *entirely* within tolerance is not novel either - it
@@ -488,7 +902,7 @@ func (p *Pipeline) noveltyMin(h uint32) int32 {
 	}
 	for i := int32(1); i <= n; i++ {
 		other := p.ring[(p.beat.beat-i)&(RingSize-1)]
-		d := hashDist(h, other)
+		d := ringDist(h, other)
 		if !seenOther && d <= DAccept {
 			continue // still inside the section h describes
 		}
@@ -762,6 +1176,34 @@ func hashDist(a, b uint32) int32 {
 	return int32((x * 0x01010101) >> 24)
 }
 
+// ringDist is the distance used for every ring comparison: the periodicity
+// confirmation (decide) and the anchor's novelty gate (noveltyMin). It is the
+// full 29-bit word.
+//
+// Measured, and deliberately not identity-only. Masking the temporal field out
+// of these comparisons was tried on the device (tools/ringab.sh, 6 runs each
+// way, same clip, same earring, LEDs dark, 15 run pairs per mode): anchor F1
+// fell from 0.29 to 0.00 median and anchors per run from 5-9 to 1-7, and the
+// periodicity confirmation agreed no better (returned F1 0.53 -> 0.41). The
+// reason is the anchor's novelty gate: it asks for the current section to be at
+// least DMin away from everything in the ring, and the temporal field's churn
+// is worth ~2 bits, so comparing identity only makes every section look less
+// novel and the anchor stops firing. Firing is what matters - the anchor is the
+// one event that realigns two earrings that drifted, and a realignment signal
+// that never fires is worth nothing however precise it is.
+//
+// The intuition that the temporal field should be excluded is not crazy (two
+// runs of one clip disagree on ~27% of those bits at the same musical instant,
+// and step 5d does exclude it from settle tracking), but the churn is not
+// independent noise: it is driven by onsets, which both devices hear. So it
+// carries real "something is happening now" evidence, and the host harness -
+// whose device models all share an identical clock and so have no phase churn at
+// all - agreed with the intuition for exactly that reason. Settle it on the
+// device.
+func ringDist(a, b uint32) int32 {
+	return hashDist(a, b)
+}
+
 // log2e returns log2(v) in Q8 fixed point, for v up to 2^32-1 (band energies
 // are uint32). The MSB search is a binary search written with plain shifts so
 // this file needs no imports (and specifically no math/bits emulation code on
@@ -815,12 +1257,18 @@ type BeatTracker struct {
 	phase  int32 // 0..Period-1
 	beat   int32 // monotonic beat count since lock; the ring index
 	bar    int32
-	Lock   int32 // votes toward lock
-	// Votes per interval bin. int8 because the range is provably 0..60:
-	// addVote clamps at 60 and decay only decrements positive entries.
-	ivis       [BeatMaxPeriod - BeatMinPeriod + 1]int8
-	lastOnset  int32
-	onsetCount int32
+	// lastOnset is the frame of the previous onset, which is what the
+	// refractory period is measured against. The interval histogram that used
+	// to live here is gone: it voted on onset intervals, and onset intervals
+	// turned out to carry no tempo information at all (see tempoScan).
+	lastOnset int32
+	// ev is the running evidence per candidate period, Q10 normalised
+	// correlation of the loudness envelope (tempoScan). int16 is enough: the
+	// values are clamped to that range by the accumulator. This is the memory
+	// the interval histogram used to occupy, and the reason it is 64 bytes
+	// rather than 32: onset intervals turned out to say nothing about tempo.
+	ev     [BeatMaxPeriod - BeatMinPeriod + 1]int16
+	evInit bool
 }
 
 // Tick advances the phase by one frame and folds in the onset. It returns
@@ -832,15 +1280,7 @@ func (b *BeatTracker) Tick(onset bool, frame int32) (bool, bool) {
 	barBoundary := false
 
 	if onset {
-		interval := frame - b.lastOnset
 		b.lastOnset = frame
-		b.onsetCount++
-		if interval >= BeatMinPeriod && interval <= BeatMaxPeriod {
-			b.vote(interval)
-		}
-		if !b.Locked && b.onsetCount >= 8 {
-			b.tryLock()
-		}
 	}
 
 	if b.Locked {
@@ -854,16 +1294,19 @@ func (b *BeatTracker) Tick(onset bool, frame int32) (bool, bool) {
 				barBoundary = true
 			}
 		}
-		// Phase-locked loop: pull the phase toward the onset so drift
-		// between the local clock and the music is corrected continuously.
+		// Phase-locked loop: pull the phase toward the onset so drift between the
+		// local clock and the music is corrected continuously. The period comes
+		// from the envelope scan and can be a frame or two off the true tempo
+		// (143 BPM is 26.9 frames), which over a minute is a whole beat of
+		// drift; this is what keeps a locked grid on the kicks instead.
 		if onset {
 			d := b.phase
 			if d > b.Period/2 {
 				d -= b.Period
 			}
-			// d in (-Period/2, Period/2]: how far we are past (or before)
-			// the nearest beat. Correct a quarter of it, with a one-frame
-			// minimum |step| so small errors do not get stuck.
+			// d in (-Period/2, Period/2]: how far we are past (or before) the
+			// nearest beat. Correct a quarter of it, with a one-frame minimum |step|
+			// so small errors do not get stuck.
 			step := d >> 2
 			if step == 0 {
 				if d > 0 {
@@ -874,8 +1317,8 @@ func (b *BeatTracker) Tick(onset bool, frame int32) (bool, bool) {
 			}
 			b.phase -= step
 			if b.phase < 0 {
-				// Stepped back through the boundary: emit it here rather
-				// than losing the beat.
+				// Stepped back through the boundary: emit it here rather than losing
+				// the beat.
 				b.phase += b.Period
 				b.beat++
 				beatBoundary = true
@@ -885,87 +1328,10 @@ func (b *BeatTracker) Tick(onset bool, frame int32) (bool, bool) {
 			}
 		}
 	} else if onset {
-		// Before lock, onsets act as (irregular) beats so the hash ring
-		// still fills and anchors can fire on songs with sparse kicks.
+		// Before lock, onsets act as (irregular) beats so the hash ring still
+		// fills and anchors can fire on songs with sparse kicks.
 		b.beat++
 		beatBoundary = true
 	}
 	return beatBoundary, barBoundary
-}
-
-// vote folds an onset interval into the interval histogram with octave
-// reinforcement (Dixon-style) and a two-frame tolerance.
-//
-// The doubling fold carries weight 2, not 1: with hats exactly between
-// kicks, most measured intervals are half-beat intervals, and the ×2 fold is
-// the main source of beat-period evidence. With weight 1 it merely cancels
-// the per-vote decay and the tracker never locks (found in testing).
-//
-// The neighbour folds exist because real onsets are not frame-exact: over a
-// 12 s EDM segment at 16 kSPS the interval between consecutive kicks spreads
-// over 23..28 frames for a single tempo, and exact-bin voting dilutes that
-// evidence below LockCount - the tracker never locks and beats stay raw
-// onsets. Two frames either way (half weight per step) bridge the spread
-// while keeping the peak centred.
-//
-// Decay runs on every other vote for the same reason: one decrement per
-// onset bounds the achievable bin height by roughly the number of onsets,
-// and at 64 fps the onset rate (not the frame rate) sets the vote budget -
-// 12 s of 137 BPM music offers only ~27 intervals to split across bins.
-// Half-rate decay doubles the evidence horizon without touching the weights.
-func (b *BeatTracker) vote(interval int32) {
-	if b.onsetCount&1 == 0 {
-		b.decay()
-	}
-	b.addVote(interval, 4)
-	b.addVote(interval-1, 2)
-	b.addVote(interval+1, 2)
-	b.addVote(interval-2, 1)
-	b.addVote(interval+2, 1)
-	b.addVote(interval/2, 3)
-	b.addVote(interval*2, 2)
-}
-
-func (b *BeatTracker) addVote(interval int32, amount int16) {
-	if interval >= BeatMinPeriod && interval <= BeatMaxPeriod {
-		i := int32(b.ivis[interval-BeatMinPeriod]) + int32(amount)
-		if i > 60 {
-			i = 60
-		}
-		b.ivis[interval-BeatMinPeriod] = int8(i)
-	}
-}
-
-//go:noinline
-func (b *BeatTracker) decay() {
-	for i := range b.ivis {
-		if b.ivis[i] > 0 {
-			b.ivis[i]--
-		}
-	}
-}
-
-// (decay/vote bounds are what keep ivis inside 0..60, which is what makes the
-// int8 representation above safe.)
-
-// tryLock picks the best tempo candidate. Only exact interval evidence
-// counts (octave reinforcement alone can lock onto a half-tempo, which is
-// still musically acceptable, so reinforced bins are included; anchors reset
-// everything anyway if it is wrong).
-//
-//go:noinline
-func (b *BeatTracker) tryLock() {
-	best := -1
-	bestCount := int8(LockCount)
-	for i, c := range b.ivis {
-		if c >= bestCount {
-			bestCount = c
-			best = i
-		}
-	}
-	if best >= 0 {
-		b.Period = int32(best) + BeatMinPeriod
-		b.Locked = true
-		b.phase = 0
-	}
 }

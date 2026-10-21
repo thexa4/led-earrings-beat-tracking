@@ -2,7 +2,14 @@
 """One-shot transform: move the flag tables from RAM vars to flash const
 strings. Parses animation.go, emits flags.go, rewrites animation.go.
 
-Color is uint32 little-endian: byte0=r, byte1=g, byte2=b, byte3=0.
+Color is stored as a packed RGB triple: three bytes, no alpha (nothing in
+the firmware reads Color's alpha bits). Every byte is emitted as an explicit
+\xHH escape.
+
+NOTE: this transform already ran once; the flag declarations it parses are no
+longer in animation.go, and flags.go has since grown staticColors and
+sparkleVariants by hand. Re-running this script as-is will fail - it is kept
+only as the record of where the tables came from.
 """
 import re, sys
 
@@ -63,33 +70,31 @@ flag_comments = {
 }
 
 def esc(bs):
-    out = []
-    for v in bs:
-        if 0x20 <= v < 0x7f and v not in (ord('"'), ord('\\')):
-            out.append(chr(v))
-        else:
-            out.append(f'\\x{v:02x}')
-    return ''.join(out)
+    # Always \xHH, uppercase: the payload is color data, never text, and raw
+    # printable bytes between the escapes read as noise.
+    return ''.join(f'\\x{v:02X}' for v in bs)
 
 lines = []
 lines.append('package main\n')
 lines.append('''
-// Flag palettes live as *const* strings: 36 little-endian Color words per
-// flag (Color is r | g<<8 | b<<16, so byte 3 is always zero). The same data
-// as `var Palette` values would need 10 x 144 bytes of RAM *plus* the same
-// 1,440 bytes of flash as the initializer, plus the init-time copy code -
-// 3 KB total for read-only data. As const strings they occupy flash only.
+// Flag palettes live as *const* strings: 36 packed RGB triples per flag.
+// Alpha is not stored at all - Color keeps it in bits 24..31 and nothing in
+// the firmware reads it (NewColor leaves it 0, the bit-bang C helpers take
+// 24-bit values) - so a color is three bytes, not four. The same data as
+// `var Palette` values would need 10 x 108 bytes of RAM *plus* the same
+// 1,080 bytes of flash as the initializer, plus the init-time copy code -
+// 2.2 KB total for read-only data. As const strings they occupy flash only.
 //
 // flags.go is generated from the original hand-written table (the generator
 // verified entry counts and that nothing else referenced the old vars); edit
 // the color/entry lists here by regenerating, not by hand.
 
-// Palette is one flag: 36 packed Color values in a string.
+// Palette is a packed list of colors, three bytes (R, G, B) each.
 type Palette string
 
 func (p Palette) color(i int) Color {
-	_ = p[4*i+3] // bounds check hint; four bytes per LED
-	return Color(p[4*i]) | Color(p[4*i+1])<<8 | Color(p[4*i+2])<<16 | Color(p[4*i+3])<<24
+	_ = p[3*i+2] // bounds check hint; three bytes per LED
+	return Color(p[3*i]) | Color(p[3*i+1])<<8 | Color(p[3*i+2])<<16
 }
 
 const (
@@ -98,7 +103,7 @@ for name in order:
     bs = []
     for cn in palettes[name]:
         v = colors[cn]
-        bs += [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff]
+        bs += [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff]  # no alpha byte
     for c in flag_comments.get(name[4:], []):
         lines.append(f'\t// {c}\n')
     lines.append(f'\tflag{name[4:]} = Palette("{esc(bs)}")\n')

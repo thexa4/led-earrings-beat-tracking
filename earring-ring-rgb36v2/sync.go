@@ -38,7 +38,6 @@ package main
 
 import (
 	"device/stm32"
-	"machine"
 	"unsafe"
 
 	"github.com/aykevl/things/earring-ring-rgb36v2/syncdsp"
@@ -77,6 +76,12 @@ var (
 	syncLocked    bool
 	syncSilent    bool
 
+	// State for the hash-view variant (sync variant 1), updated in syncPoll
+	// once per analysis frame and read per LED by syncHashAnimate.
+	syncHashCol   Color  // solid section color: hash at the last anchor
+	syncBeatCount int32  // beats since startSync, for the marker position
+	syncDotQ8     uint32 // marker position, 1/256 LED units, wraps at 36
+
 	syncRunning bool  // capture is up (also: stopSync is idempotent)
 	syncRead    int   // next sample to consume from adcData
 	syncFed     int32 // samples fed into the current analysis frame
@@ -94,6 +99,9 @@ func startSync() {
 	syncAnchorAge = 100
 	syncLocked = false
 	syncSilent = false
+	syncHashCol = 0
+	syncBeatCount = 0
+	syncDotQ8 = 0
 	syncRead = 0
 	syncFed = 0
 	syncRunning = true
@@ -131,69 +139,16 @@ func startSync() {
 	for stm32.RCC.CFGR.Get()&stm32.RCC_CFGR_SWS_Msk != (stm32.RCC_CFGR_SWS_HSI16 << 2) {
 	}
 
-	// Power on microphone.
-	micPin.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	micPin.High()
-
-	// ADC clock: PCLK2 undivided (see dataRecv for why).
-	stm32.RCC.SetCFGR_PPRE2(stm32.RCC_CFGR_PPRE2_Div1)
-	stm32.RCC.SetAPB2ENR_ADCEN(1)
-
-	// Power on ADC.
-	stm32.ADC.ISR.Set(stm32.ADC_ISR_ADRDY)             // clear ADRDY bit
-	stm32.ADC.CR.Set(stm32.ADC_CR_ADEN)                // enable ADC
-	for stm32.ADC.ISR.Get()&stm32.ADC_ISR_ADRDY == 0 { // wait until ready
-	}
-
-	// Mic on channel 8 (PB0).
-	stm32.ADC.CHSELR.Set(1 << 8)
-
-	// TIM22 triggers the ADC at fs; ARR=1 so the update event (TRGO) happens
-	// every other PCLK: fs = 16 MHz / (2 * (PSC+1)).
-	stm32.RCC.SetAPB2ENR_TIM22EN(1)
-	stm32.TIM22.PSC.Set(syncPSC)
-	stm32.TIM22.ARR.Set(1)
-	stm32.TIM22.CR1.Set(stm32.TIM_CR1_CEN)
-	stm32.TIM22.CR2.Set(stm32.TIM_CR2_MMS_Update << stm32.TIM_CR2_MMS_Pos)
-
-	// DMA: one circular 250-sample window. adcData is 400 samples long
-	// (dataRecv's double symbol buffer); sync mode uses the first 250 of it,
-	// reusing existing RAM rather than declaring a second buffer.
-	stm32.RCC.AHBENR.SetBits(stm32.RCC_AHBENR_DMAEN)
-	stm32.DMA1.CH[0].PAR.Set(uint32(uintptr(unsafe.Pointer(&stm32.ADC.DR))))
-	stm32.DMA1.CH[0].MAR.Set(uint32(uintptr(unsafe.Pointer(&adcData[0]))))
-	stm32.DMA1.CH[0].NDTR.Set(syncWindowSize)
-	stm32.DMA1.CH[0].CR.Set(stm32.DMA_CH_CR_MINC |
-		stm32.DMA_CH_CR_MSIZE_Bits16<<stm32.DMA_CH_CR_MSIZE_Pos |
-		stm32.DMA_CH_CR_PSIZE_Bits16<<stm32.DMA_CH_CR_PSIZE_Pos |
-		stm32.DMA_CH_CR_CIRC)
-	stm32.DMA1.CH[0].CR.SetBits(stm32.DMA_CH_CR_EN)
-
-	// ADC: continuous DMA, one transfer per TIM22 trigger, 32x oversampling
-	// with a 1-bit shift (same as dataRecv): resolution + noise shaping for
-	// free. Each trigger's sub-conversions take ~461 ADC cycles (measured),
-	// which at the 8 MHz ADC clock below is ≈ 58 µs - inside the 62.5 µs
-	// sample period, so no trigger is missed (at the old 4.19 MHz PCLK and
-	// ADCPRE=1 they took ~110 µs, which is exactly where the 8.8 kSPS came
-	// from).
-	stm32.ADC.CFGR1.Set(stm32.ADC_CFGR1_DMAEN | stm32.ADC_CFGR1_DMACFG |
-		stm32.ADC_CFGR1_EXTSEL_TIM22_TRGO<<stm32.ADC_CFGR1_EXTSEL_Pos |
-		stm32.ADC_CFGR1_EXTEN_RisingEdge<<stm32.ADC_CFGR1_EXTEN_Pos)
-	// Full Set (not SetBits) with CKMODE left at 0: a preceding mic mode
-	// configures the ADC on PCLK with low-frequency mode, and that would
-	// both starve the 32x oversampling and mis-clock the conversions.
-	stm32.ADC.CFGR2.Set(0 |
-		stm32.ADC_CFGR2_OVSE |
-		1<<stm32.ADC_CFGR2_OVSS_Pos |
-		stm32.ADC_CFGR2_OVSR_Mul32<<stm32.ADC_CFGR2_OVSR_Pos)
-	// CCR: ADCPRE = AHB/2 (bits 29:28; TinyGo's device/stm32 has no constant
-	// for this part), everything else zero (LFMEN off). The divider matters
-	// now that PCLK is 16 MHz: the datasheet caps the ADC clock at 14 MHz, so
-	// /1 would run it 14% over spec, while /4 (115 µs per trigger) would miss
-	// triggers. /2 is the only setting that is both in spec and fast enough.
-	stm32.ADC.CCR.Set(1 << 28)
-
-	stm32.ADC.CR.Set(stm32.ADC_CR_ADEN | stm32.ADC_CR_ADSTART)
+	// Capture: one circular 250-sample window at exactly 16 kSPS
+	// (16 MHz / (2 * (499+1))). adcData is 400 samples long (dataRecv's
+	// double symbol buffer); sync mode uses the first 250 of it, reusing
+	// existing RAM rather than declaring a second buffer. ADCPRE=AHB/2 is
+	// the only setting that is both inside the 14 MHz ADC spec and fast
+	// enough to hit every trigger at this clock (see capture.go; the old
+	// 4.19 MHz PCLK with ADCPRE=1 took ~110 µs per oversampled conversion,
+	// which is where the measured 8.8 kSPS came from).
+	startCapture(uint32(uintptr(unsafe.Pointer(&adcData[0]))), syncWindowSize,
+		syncPSC, 1<<28)
 }
 
 // waitForVOS waits for the power regulator to finish the voltage-scale switch
@@ -226,22 +181,7 @@ func stopSync() {
 	}
 	syncRunning = false
 
-	// Stop DMA.
-	stm32.DMA1.CH[0].CR.ClearBits(stm32.DMA_CH_CR_EN)
-	stm32.RCC.AHBENR.ClearBits(stm32.RCC_AHBENR_DMAEN)
-
-	// Shut down ADC (reset also clears its oversampling config for whoever
-	// runs next).
-	stm32.RCC.APB2RSTR.Set(stm32.RCC_APB2RSTR_ADCRST)
-	stm32.RCC.APB2RSTR.Set(0)
-	stm32.RCC.SetAPB2ENR_ADCEN(0)
-	stm32.RCC.SetCFGR_PPRE2(stm32.RCC_CFGR_PPRE2_Div16)
-
-	// Shut down timer.
-	stm32.RCC.SetAPB2ENR_TIM22EN(0)
-
-	// Power off microphone.
-	micPin.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
+	stopCapture()
 
 	// Back to the animation clock: switch to MSI first (still Range2, the
 	// idle speed - startSync no longer retunes MSI), then it is legal to drop
@@ -310,6 +250,14 @@ func syncPoll() {
 	}
 	if ev.Anchor {
 		syncAnchorAge = 0
+		// The hash-view variant shows the section's hash as a solid color,
+		// changed here at the anchor - the moment the section (and therefore
+		// the color) is decided. Held until the next anchor, so two earrings
+		// hearing the same music display the same color for the same section.
+		syncHashCol = hashColor(ev.Hash)
+	}
+	if ev.Beat {
+		syncBeatCount++
 	}
 	if ev.PatternChanged {
 		// Map pattern -> palette here rather than per LED in syncAnimate:
@@ -318,16 +266,37 @@ func syncPoll() {
 	}
 	syncLocked = ev.Locked
 	syncSilent = ev.Silent
+
+	// Beat marker position for the hash view: the dot travels a quarter of the
+	// ring (9 of 36 LEDs) per beat, smooth between beats by interpolating the
+	// tracker's own period. One division per frame on a machine that does 64
+	// frames/s with ~2k cycles of boundary work - noise.
+	per := syncPipe.BeatPeriod()
+	if per < 1 {
+		per = 26 // before the first lock: keep the position well-defined
+	}
+	age := syncBeatAge
+	if age > per {
+		age = per
+	}
+	syncDotQ8 = (uint32(syncBeatCount)*9<<8 +
+		(9<<8)*uint32(age)/uint32(per)) % (36 << 8)
 }
 
 // syncAnimate draws one LED for party sync mode.
 //
 // It deliberately does not take the main loop's frame counter: at the sync
-// clock rate that counter advances ~16x faster than the animations were tuned
-// for. syncAnimFrame advances once per analysis frame (~16 Hz), which is both
+// clock rate that counter advances 4x faster than the animations were tuned
+// for. syncAnimFrame advances once per analysis frame (64 Hz), which is both
 // a good animation rate and the rate every other earring is animating at, so
 // the same pattern on two earrings is frame-locked as well as music-locked.
-func syncAnimate(led int) Color {
+//
+// Variant 1 is not an animation but an instrument: see syncHashAnimate.
+func syncAnimate(led, variant int) Color {
+	if variant == 1 {
+		return syncHashAnimate(led)
+	}
+
 	// The pipeline picks one of NumPatterns patterns from the spectrum (a
 	// pure function, identical on every device); the noise palettes give
 	// them visibly different looks.
@@ -357,4 +326,99 @@ func syncAnimate(led int) Color {
 	}
 
 	return c
+}
+
+// syncHashAnimate is sync mode's second variant: a readout of what the
+// pipeline knows, for verifying several earrings in a room against each other
+// (and against the music) at a glance.
+//
+//   - The whole ring shows one solid color, the current section's hash mapped
+//     to hue. It changes at anchors - the moments an earring decides the music
+//     moved to a new section - so two earrings in the room snap to the same
+//     color at the same instant if they agree, and a color that never changes
+//     (or changes at different times) reads immediately as no anchor / wrong
+//     anchor.
+//   - A single dot travels a quarter of the ring per beat - one lap per bar -
+//     and blinks black/white at ~11 Hz (every 3 of the 64 analysis frames:
+//     fast enough to read as a strobe, slow enough to stay distinct on video).
+//     Two earrings whose dots chase at the same tempo are locked to the same
+//     beat period; the dot position within the lap shows the bar phase.
+//   - Unlocked: the ring stays dark apart from a dim base, so lock status is
+//     readable from the color appearing at all.
+//
+// All the state (syncHashCol, syncDotQ8) is computed once per frame in
+// syncPoll; this runs per LED.
+func syncHashAnimate(led int) Color {
+	if syncSilent {
+		return Color(0)
+	}
+	if !syncLocked {
+		// Finding the tempo: dim uniform glow, no color, no dot.
+		return NewColor(24, 24, 24)
+	}
+	c := syncHashCol
+	if syncAnchorAge <= 1 {
+		// The anchor frame itself: one white frame so the snap is obvious.
+		return NewColor(255, 255, 255)
+	}
+
+	// Dot at syncDotQ8>>8, blended into its neighbour by the fraction, so it
+	// slides instead of jumping (9 LEDs per beat at 64 fps is a third of an
+	// LED per frame - unblended that would look like a strobe, not a sweep).
+	p0 := int(syncDotQ8 >> 8)
+	frac := uint32(syncDotQ8 & 0xff)
+	w := uint32(0)
+	switch (led - p0 + 36) % 36 {
+	case 0:
+		w = 256 - frac
+	case 1:
+		w = frac
+	}
+	if w > 0 {
+		// Blink ~11 Hz: dot alternates white and off (black), so its
+		// position reads even against a light-colored background.
+		var tr, tg, tb uint32
+		if (syncAnimFrame/3)%2 == 0 {
+			tr, tg, tb = 255, 255, 255
+		}
+		return NewColor(
+			uint8((uint32(c.R())*(256-w)+tr*w)>>8),
+			uint8((uint32(c.G())*(256-w)+tg*w)>>8),
+			uint8((uint32(c.B())*(256-w)+tb*w)>>8))
+	}
+	return c
+}
+
+// hashColor maps a section hash to a solid color: hue from the hash bits,
+// full saturation and value so every section is a distinct primary. The 29
+// hash bits are folded so all three fields (temporal, shape, hot) influence
+// the hue - the point is to *see* the hash, and two hashes differing in any
+// field should not look the same.
+func hashColor(h uint32) Color {
+	x := h ^ (h >> 9) ^ (h >> 18)
+	return hsvToRGB(uint8(x), 255, 255)
+}
+
+// hsvToRGB: 8-bit hue wheel (0=red, 85=green, 170=blue), classic 6-sector
+// conversion, integer only (this runs on a Cortex-M0+ with no FPU).
+func hsvToRGB(h, s, v uint8) Color {
+	region := uint16(h) * 6 >> 8
+	f := uint16(h) * 6 & 0xff
+	p := uint16(v) * (255 - uint16(s)) >> 8
+	q := uint16(v) * (255 - uint16(s)*f>>8) >> 8
+	t := uint16(v) * (255 - uint16(s)*(255-f)>>8) >> 8
+	switch region {
+	case 0:
+		return NewColor(v, uint8(t), uint8(p))
+	case 1:
+		return NewColor(uint8(q), v, uint8(p))
+	case 2:
+		return NewColor(uint8(p), v, uint8(t))
+	case 3:
+		return NewColor(uint8(p), uint8(q), v)
+	case 4:
+		return NewColor(uint8(t), uint8(p), v)
+	default:
+		return NewColor(v, uint8(p), uint8(q))
+	}
 }

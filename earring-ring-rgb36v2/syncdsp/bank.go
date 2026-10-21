@@ -83,11 +83,65 @@ type bank struct {
 	rungB    [NStages]int32 // second pole of each rung
 
 	energy [NBands]uint32 // sum of |band| over the frame
+
+	// gainShift scales the DC-blocked sample; see Pipeline.agcUpdate for what
+	// picks it and bank.run for where it is applied.
+	gainShift int32
+
+	// Input swing of the frame being accumulated, in raw ADC counts around
+	// whatever bias that word carries. This is the level the gain tracker is
+	// chosen from, and it is deliberately measured before the blocker, before
+	// the gain and before any limiter, for two reasons: peak-to-peak ignores
+	// the microphone bias without needing to estimate it (a bench device idles
+	// 15600 counts off mid-rail), and a post-gain detector would be blind
+	// exactly when it matters - a loud input at startup is caught by the
+	// limiter, so the clipped value is all it would see, and it would conclude
+	// the signal is quiet and keep the gain up.
+	minX, maxX int32
 }
 
-// reset clears the filter state. Called from Pipeline.Init.
+// inputPeakPP returns the input swing accumulated over the frame just finished
+// and arms the trackers for the next one.
+func (b *bank) inputPeakPP() int32 {
+	pp := b.maxX - b.minX
+	b.minX, b.maxX = 1<<30, -(1 << 30)
+	return pp
+}
+
+// reset clears the filter state, including the gain. Called from Pipeline.Init.
 func (b *bank) reset() {
 	*b = bank{}
+	b.minX, b.maxX = 1<<30, -(1 << 30)
+}
+
+// scalePow multiplies by 2^d for either sign of d, rounding on the way down so
+// a reduction does not bias the signal low by half an LSB. (Go's shift operators
+// take an unsigned count, so `v << uint(-1)` is not a down-shift - it is a
+// shift by 4294967295, which is zero for every v the pipeline produces. This is
+// the only place either direction is needed, hence the helper rather than a
+// general routine.)
+func scalePow(v, d int32) int32 {
+	if d >= 0 {
+		return v << uint(d)
+	}
+	return (v + 1<<(-d-1)) >> uint(-d)
+}
+
+// rescaleGain moves the filter state by the same factor as a change of
+// gainShift, so the step is invisible at the band outputs. The DC blocker's y
+// is part of that state now - the gain is applied inside its recursion - so it
+// moves too; hpX is not, being a sample of the un-scaled input.
+//
+// Shifting the states right loses bits, so it rounds: an unrounded shift
+// would bias the state low by half an LSB per step, which is a deterministic
+// error but a device-specific one (it depends on how many steps that device
+// took to reach its level).
+func (b *bank) rescaleGain(d int32) {
+	b.hpY = scalePow(b.hpY, d)
+	for i := range b.rungA {
+		b.rungA[i] = scalePow(b.rungA[i], d)
+		b.rungB[i] = scalePow(b.rungB[i], d)
+	}
 }
 
 // bankShape marks the rungs whose truncation error gets fed back.
@@ -134,11 +188,55 @@ func (b *bank) reset() {
 // disagreement. See bankShape for why the next step - error feedback - is *not*
 // taken.
 func (b *bank) run(x int32) {
-	// DC block: y = r·(y + x - x_prev).
+	// DC block with the input gain folded into the recursion:
+	//
+	//	y[n] = r·(y[n-1] + G·(x[n] - x[n-1]))
+	//
+	// which is exactly G·HP(x): the transposed form only ever sees the input
+	// *difference*, and the microphone bias lives in x's absolute value, so it
+	// cancels in x[n]-x[n-1] whether or not the difference is scaled. That is
+	// what makes the gain safe to apply this early - putting it on the
+	// pipeline input instead amplifies the 15600-count bias along with the
+	// music (tried, and it needs a DC estimator that then tracks the kick
+	// waveform and breaks beat lock).
+	//
+	// It also moves where the rounding happens, which is the point. Scaling
+	// the blocker's *output* quantises the pre-gain signal, so a device 42 dB
+	// down carries 64x more relative rounding noise than one at full level;
+	// measured as 3.6 bits of steady-state hash disagreement between two
+	// devices hearing the same music. Inside the recursion the error is
+	// ±1 LSB of the post-gain signal, which is the same for every device.
+	if x < b.minX {
+		b.minX = x
+	}
+	if x > b.maxX {
+		b.maxX = x
+	}
 	const half = 1 << (poleShift - 1)
-	y := ((16384-HPK)*(b.hpY+x-b.hpX) + half) >> poleShift
+	dx := scalePow(x-b.hpX, b.gainShift)
 	b.hpX = x
+	// |y| ≤ |d| for this structure, so |s| is bounded by the clamp below, and
+	// 2^17·16192 = 2.12e9 is the largest product that stays inside int32. At
+	// gain 1 the clamp can never engage (|d| ≤ 65535 ⇒ |s| ≤ 131070), so it is
+	// purely a limiter for a blast that arrives before the gain has come down;
+	// it lets through a flat-top for a sample or two, and the AGC drops gain
+	// the frame it sees the peak.
+	s := b.hpY + dx
+	if s > 1<<17 {
+		s = 1 << 17
+	} else if s < -(1 << 17) {
+		s = -(1 << 17)
+	}
+	y := ((16384-HPK)*s + half) >> poleShift
 	b.hpY = y
+
+	// Saturating: the gain is picked so this almost never engages, and a
+	// transient that does hit it loses a peak, not the frame.
+	if y > AgcFullScale {
+		y = AgcFullScale
+	} else if y < -AgcFullScale {
+		y = -AgcFullScale
+	}
 
 	prev := y
 	for i := 0; i < NStages; i++ {

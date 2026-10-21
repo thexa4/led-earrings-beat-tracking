@@ -37,6 +37,74 @@ const (
 // spectrum, silence and quiet music get the same word on every device.
 const RelFloorQ8 = 10 << 8 // 30 dB below the loudest band
 
+// Input normalization (see Pipeline.feed).
+//
+// The hash and the thresholds are all relative, so in principle the absolute
+// input level does not matter. Measured, it does: replaying the same 60 s of
+// music through this pipeline at successively lower level (pipeline-sees RMS,
+// 2026-10 bench sweep)
+//
+//	RMS   43   86   172   430   860  1720  3440  4303
+//	per   19   23    20    28    28    28    28    27   (beat period, frames)
+//	pat  41%  62%   66%   96%   99%   99%   99%  100%   (pattern vs the loud run)
+//	hsh  88%  89%   91%   92%   92%   93%   93%   98%   (exact hash vs loud)
+//
+// Below roughly 400 counts the one-pole ladder's integer stalls are no longer
+// negligible against the signal, the spectrum distorts, and the beat tracker
+// locks to a different tempo - two earrings 20 dB apart would then disagree on
+// everything, which is the exact failure this whole design exists to prevent.
+// A real earring on a bench hears ~40 counts RMS (a loud speaker at 1 cm), so
+// this is not a corner case: it is the operating point.
+//
+// So the normalizer holds each device's post-gain peak inside a band with a
+// power-of-two gain, which the relative hash cancels exactly
+// (TestHashLevelInvariant), and which keeps every device in the flat part of
+// the sweep above.
+const (
+	// AgcHighPeak: above this post-gain peak the gain comes down, immediately,
+	// to the largest value that fits. It sits ~1.4 octaves below the rail so
+	// the next transient lands inside the bank's headroom instead of clipping.
+	// A device louder than this with zero gain stays there: the sweep shows
+	// agreement is flat all the way up, and attenuation would only throw signal
+	// away.
+	AgcHighPeak = 12000
+	// AgcLowPeak: below this the gain goes up, slowly. The 4:1 band is the
+	// point. With one threshold, music whose peak wanders near it toggles the
+	// gain every few bars, and each toggle is a discontinuity the two earrings
+	// hit on different frames - measurably worse than no AGC at all. Inside the
+	// band nothing moves, so two devices converge and then sit still.
+	AgcLowPeak = 3000
+	// AgcMaxShift caps the gain at 2^6 = 64x, which puts the ceiling at a
+	// 187-count pre-gain peak. Higher gains would amplify the front end's own
+	// noise into the pipeline as if it were music - the onset detector has no
+	// other way to tell them apart (see the silence-gate note in PARTY-SYNC).
+	AgcMaxShift = 6
+	// AgcMinShift allows attenuation down to 1/4. Not for headroom - the
+	// saturation in bank.run handles a transient - but because the internal
+	// level is itself the thing two devices must agree on: the sweep shows
+	// decisions drifting whenever the post-gain peak sits more than a factor of
+	// two apart, and a device beside the PA would otherwise sit a factor of 4
+	// above the band no matter what it did. The cost is 2 bits of resolution on
+	// the loudest inputs, which is nothing next to the drift it removes.
+	AgcMinShift = 0
+	// AgcPeakDecay is the peak-hold leak: 2^9 frames, a ~8 s time constant.
+	// Far longer than a bar or a phrase on purpose: within a track the level is
+	// set once and only a genuinely different track moves it. A fast leak makes
+	// every quiet break a gain change, and the pumping that follows is what the
+	// wide band above exists to avoid.
+	AgcPeakDecay = 9
+	// AgcHoldFrames is the minimum wait between gain *increases*: 2 s.
+	// Decreases stay instant - a gain too high clips on the next transient and
+	// is corrected the same frame, while a gain too low is silent and
+	// persistent.
+	AgcHoldFrames = 128
+	// AgcFullScale saturates the amplified sample, protecting the bank's
+	// "every node is bounded by the input amplitude" property. Note the gain is
+	// applied *after* the bank's DC block, so the microphone bias (which on the
+	// bench device is 15600 counts) is not part of what gets amplified.
+	AgcFullScale = 1<<15 - 1
+)
+
 // Silence detection, also relative for the same reason: a frame is silent
 // when it is far quieter than the loudest frame seen recently. Silent frames
 // push nothing to the ring and trigger no decision, so a quiet room leaves the
@@ -84,7 +152,14 @@ const (
 	// differences flip bits randomly between devices, so this is the single
 	// most important knob for cross-device agreement. Because it is a
 	// difference threshold it needs no knowledge of the device's gain.
-	TemporalDeadband = 128 // 3 dB
+	//
+	// 32 (0.75 dB), tuned on the whole 60-minute podcast (not a synth patch):
+	// the smoothed-vs-previous-push difference rarely reaches the old 3 dB, so
+	// the field sat stuck at zero - the podcast-wide hash had 0.78 usable bits
+	// and one word covered 84% of all beats. Halving it again measured no
+	// better; this sits on the plateau between dead and churning. See
+	// tools/hashsweep.py and syncdsp/podcast_hash_test.go.
+	TemporalDeadband = 32 // 0.75 dB
 
 	// ShapeLoQ8 and ShapeHiQ8 are the two thresholds of the shape field's
 	// two-bit code, in Q8 log2 units above the fitted spectral line: code 1
@@ -92,15 +167,30 @@ const (
 	// critical (anything that separates "on the line" from "a peak" works);
 	// they are a quantisation of the spectrum's shape, and the cross-device
 	// robustness comes from the fitted line, not from the thresholds.
-	ShapeLoQ8 = 128 // 3 dB
-	ShapeHiQ8 = 512 // 12 dB
+	//
+	// 48 and 96 (1.5 and 3 dB), from the podcast-wide sweep. Real spectra hug
+	// the fitted line within a couple of dB, so the old 3/12 dB pair left most
+	// shape bits at code 0 and the top code unreachable everywhere - the tier
+	// was decoration, not information. With both thresholds live the code-2
+	// tier fires on genuine spectral peaks, and the synth's break-vs-drop
+	// sections separate again (distance >= DMin) while the podcast's worst
+	// device still sits inside DAccept. 96 beat 128 and 192 on anchor
+	// agreement (F1 0.73 vs 0.70/0.50 on the tilt device).
+	ShapeLoQ8 = 48 // 1.5 dB
+	ShapeHiQ8 = 96 // 3 dB
 
 	// HotFloorQ8 is the hot-band field's threshold: a band within this much
 	// (Q8 log2) of the loudest band of the smoothed spectrum is "hot". Unlike
 	// RelFloorQ8 (the noise pin, 30 dB) this is deliberately tight: it is the
 	// field that separates a narrow arrangement (a pad: one or two hot bands)
 	// from a wide one (a full drop: most bands hot).
-	HotFloorQ8 = 3 << 8 // 18 dB
+	//
+	// 192 (4.5 dB), tuned on the whole podcast: EDM spans less than even 18 dB
+	// across the band set, so the old value left every band hot everywhere -
+	// all eight bits stuck at 1, zero usable information. 4.5 dB separates hot
+	// from not without churning between devices (worst-device steady distance
+	// p95 stays within DAccept, and TestAgreement's synth guards stay clean).
+	HotFloorQ8 = 192 // 4.5 dB
 
 	// SmoothShift is the time constant of the spectrum the hash and the pattern
 	// are read from, in analysis frames: 2^5 = 32 frames, about half a second.
@@ -207,20 +297,78 @@ const (
 	WarmupFrames = 64
 
 	// BeatMinPeriod and BeatMaxPeriod bound the beat period search, in
-	// analysis frames (15.6 ms at the true 64 fps frame rate): 18 frames
-	// ≈ 213 BPM, 49 frames ≈ 49 BPM. EDM is far inside this. The floor
-	// used to be 10 (≈ 426 BPM at 64 fps) from the 8.8 kSPS era; at the
-	// real frame rate it admitted hat-rate intervals, which voted and won:
-	// confident double-time locks (274-349 BPM) on 143 BPM music.
+	// analysis frames (15.6 ms each): 10 frames ≈ 240 BPM, 49 frames ≈ 49
+	// BPM. EDM is far inside this.
 	BeatMinPeriod = 18
 	BeatMaxPeriod = 49
 
-	// BeatRefractoryFrames: minimum spacing between onsets (~234 ms).
-	// Was 8 (~125 ms), which let open hats 13-14 frames after a kick
-	// register as separate onsets at 64 fps.
+	// TempoWindow is the envelope history the beat tracker correlates: 256
+	// frames = 4 s, a power of two so the ring wraps with a mask instead of a
+	// compare. Windows from 3 to 6 s score the same on real material (within a
+	// couple of percent of correctly-picked lag), so the shortest one that
+	// still holds 5 beats at the slowest tracked tempo wins on RAM.
+	//
+	// 512 (8 s) was tried, twice, and is measurably worse on the device. The
+	// motivation was real - 26-vs-27 is a genuine near-tie of this estimator
+	// (device run pairs split it 5 times in 15, and the host margin is only
+	// 13%, stable across capture phase and noise) - but doubling the window did
+	// not buy resolution, it bought trend: the host margin *shrank* to 10% on
+	// the bench-channel clips, and on the earring - which hears bass rumble the
+	// host model does not - the scan locked onto period 18, BeatMinPeriod, and
+	// stayed there. Autocorrelation of low-frequency wander rises toward short
+	// lags, and a 2x longer window with the ref kept at ring-length/2 (>>10) is
+	// 2x more wander. Slowing the ref cannot fix that (same ratio, same wander
+	// relative to the ring); high-passing it harder is the documented failure
+	// mode in pushEnv. 4 s it stays.
+	TempoWindow = 256
+	EnvMask     = TempoWindow - 1
+	// TempoStep is how often the scan runs: every 2 s. A scan is 32 candidate
+	// lags x 256 products, so the cost is bounded by one 8k-MAC burst per 2 s -
+	// under 1% of a frame on average on a 16 MHz M0+ next to the filter bank.
+	TempoStep = 128
+	// TempoScale is the Q10 fixed point the per-lag evidence is kept in: a
+	// candidate's correlation divided by the envelope's own variance, times
+	// 1024. Normalising matters because raw correlation scales with how loud
+	// the modulation is, and the same song moves between pianissimo and a drop;
+	// devices (and the same device over time) have to compare like with like.
+	TempoScale = 1024
+	// TempoMinEvidence is the peak normalised correlation required before the
+	// tracker claims a tempo at all, in TempoScale units: 0.1875. Measured over
+	// the five real samples, the peak sits at 0.42-0.67 of the envelope's
+	// variance where the kick is present and under 0.1 where it is not - a
+	// breakdown, a stretch of talk. Locking onto those is worse than not
+	// locking: the period is then wrong for as long as it takes to notice.
+	TempoMinEvidence = 192
+	// TempoEvidenceShift is the time constant of the accumulator that averages
+	// each candidate's evidence over successive scans, as a shift: 1/8 per scan
+	// over a 2 s scan is ~16 s of evidence. Averaging is what makes the choice
+	// stable: single 4 s windows pick the right lag only 57-61% of the time,
+	// while the accumulated evidence settles on the right lag on all five
+	// samples and stays there.
+	//
+	// 1/4 -> 1/8 was made for the run-to-run tie, not for correctness, and won
+	// on the device. The 26-vs-27 choice on the test clip is a stable near-tie
+	// on the host (13% margin, invariant to capture phase, noise seed and
+	// channel model - the estimator's resolution, not noise), but at 1/4 the
+	// earring split it run to run. Matched 8-run batches, same clip, same seat,
+	// LEDs dark (tools/runbatch.sh, scored by tools/batchscore.py):
+	//
+	//	                   period agreement   changes of mind   anchor F1
+	//   1/4 (shift 2)         21/28              22             0.33
+	//   1/8 (shift 3)         28/28               4             0.38
+	//
+	// The identity fields are untouched by this constant and measured the same
+	// in both batches (1.28 vs 1.35) - the agreement gain is entirely the tempo
+	// no longer wandering: at 1/4 individual runs made up to 6 excursions
+	// (26->20->26->27 in one) while at 1/8 the worst run made one 10 s detour.
+	// Excursions are the anti-sync event: two earrings hearing identical music
+	// take them at different times, because their cause - which 4 s of noise
+	// the EMA happened to be holding - is per-device. What 1/8 gives up is
+	// reconvergence after a genuine tempo change (~16 s of evidence instead of
+	// ~8 s, ~40 s instead of ~26 s to fully flip the accumulator on the test
+	// case); the party use case tolerates that, and no host test measures it -
+	// guards and the full-podcast F1 harness pass identically at both values.
+	TempoEvidenceShift = 3
+	// BeatRefractoryFrames: minimum spacing between onsets (~125 ms).
 	BeatRefractoryFrames = 15
-
-	// LockCount is how many interval-histogram votes are needed before the
-	// beat tracker claims lock.
-	LockCount = 12
 )

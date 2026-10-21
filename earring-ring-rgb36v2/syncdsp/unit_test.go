@@ -307,15 +307,20 @@ func TestHashDeadband(t *testing.T) {
 	if h := hashFrame(cur, old, &dev) & ((1 << NBands) - 1); h != 0 {
 		t.Errorf("identical flat frames should have no temporal bits, got %015b", h)
 	}
-	// 1 dB up in band 3 (256 Q8 log2 == 6.02 dB): below the 3 dB deadband.
-	old[3] = cur[3] - 256/6
+	// Half the deadband must never flip; twice it must. Expressed through the
+	// constant rather than hard-coded dB: the threshold was retuned from 3 dB
+	// to 0.75 dB by the podcast-wide sweep (tools/hashsweep.py), and a test
+	// that names the old number guards nothing after a retune.
+	old[3] = cur[3] - TemporalDeadband/2
 	if h := hashFrame(cur, old, &dev); h&(1<<3) != 0 {
-		t.Errorf("1 dB change flipped a temporal bit: %015b", h)
+		t.Errorf("change of %d Q8 (half the %d deadband) flipped a temporal bit: %015b",
+			TemporalDeadband/2, TemporalDeadband, h)
 	}
-	// 6 dB up: must flip.
-	old[3] = cur[3] - 256
+	// Well above the deadband: must flip.
+	old[3] = cur[3] - 2*TemporalDeadband
 	if h := hashFrame(cur, old, &dev); h&(1<<3) == 0 {
-		t.Errorf("6 dB change did not flip: %015b", h)
+		t.Errorf("change of %d Q8 (twice the deadband) did not flip: %015b",
+			2*TemporalDeadband, h)
 	}
 }
 

@@ -45,7 +45,7 @@ const variantsPerMode = "\x03" + // modeTrace
 	"\x0d" + // modeVUMeter (numStaticColors)
 	"\x00" + // modeCustom0: capped by the pattern itself
 	"\x00" + // modeCustom1: ditto
-	"\x01" + // modeSync: the pattern is chosen by the music, not the user
+	"\x02" + // modeSync: variant 0 = music-chosen pattern, variant 1 = hash readout
 	"\x00" + // modeLast (not a mode)
 	"\x00" + // modeTest
 	"\x02" // modeQA
@@ -90,7 +90,7 @@ func animate(mode, variant, led, frame int) Color {
 	case modeCustom1:
 		return showCustom(led, frame, variant, 1)
 	case modeSync:
-		return syncAnimate(led)
+		return syncAnimate(led, variant)
 	case modeTest:
 		return testPulse(led, frame)
 	case modePowerOn:
@@ -168,7 +168,7 @@ func noise(led, frame, variant int) Color {
 	}
 	x := uint32(frame) << uint32(noiseSpeeds[variant])
 	y := uint32(led) << uint32(noiseSpreads[variant])
-	r, g, b := palette16At(noisePalettes[variant*64:(variant+1)*64], ledsgo.Perlin2(x, y)*2)
+	r, g, b := palette16At(noisePalettes[variant*48:(variant+1)*48], ledsgo.Perlin2(x, y)*2)
 	return NewColor(r, g, b)
 }
 
@@ -408,11 +408,7 @@ func staticColor(led, frame, variant int) Color {
 
 // (Palette and the flag tables moved to flags.go.)
 func showFlag(led, frame, variant int) Color {
-	if variant >= numFlags {
-		// This shouldn't actually happen.
-		return NewColor(0, 0, 0)
-	}
-	return allFlags[flagSize*variant : flagSize*(variant+1)].color(led)
+	return flagColor(variant, led)
 }
 
 // Basic VU meter like animation, with different colors.

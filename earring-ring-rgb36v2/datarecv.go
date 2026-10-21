@@ -64,7 +64,21 @@ func adcDataWriteIndex() uint32 {
 	return uint32(len(adcData)) - stm32.DMA1.CH[0].NDTR.Get()
 }
 
-var decoder datatrans.Decoder
+// The receive decoder lives *inside* the sync pipeline (see main.syncPipe):
+// the two engines are never live at the same time - dataRecv runs the main
+// loop with sync stopped (main.go stops sync on every mode switch, and sync
+// mode has no path into dataRecv), and both re-init their state on entry
+// (startSync -> Pipeline.Init, dataRecv -> Decoder.Initialize), so neither
+// ever reads the other's leftovers. syncPipe is the larger of the two, and
+// both are plain integer structs, so the cast is safe.
+//
+// This overlay saves 592 B of RAM. Unlike the rejected animationBuf overlay
+// (which aliased the DMA buffer and cost the feed loop its register
+// allocation), neither loop reads the other's storage here: the receive
+// loop consumes adcDataNormalized, and sync never runs during a receive.
+var decoder = (*datatrans.Decoder)(unsafe.Pointer(&syncPipe))
+
+var _ [unsafe.Sizeof(syncPipe) - unsafe.Sizeof(datatrans.Decoder{})]byte
 
 var adcWriteWindow uint8 = 0 // 0 or 1 to indicate current window
 
@@ -152,58 +166,14 @@ func dataRecv(slot int) {
 	// Switch system clock to 4.2MHz.
 	stm32.RCC.SetICSCR_MSIRANGE(stm32.RCC_ICSCR_MSIRANGE_Range6)
 
-	// Power on microphone.
-	micPin.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	micPin.High()
-
-	// Provide clock to ADC.
-	// Note that PCLK2 is divided when the mic is disabled to save power (~1µA),
-	// but the ADC doesn't work with such a low frequency so we need to set the
-	// division value back to 1 (no division).
-	stm32.RCC.SetCFGR_PPRE2(stm32.RCC_CFGR_PPRE2_Div1)
-	stm32.RCC.SetAPB2ENR_ADCEN(1)
-
-	// Power on ADC.
-	// - clear ADRDY bit
-	// - ADEN set to 1
-	// - wait for ADRDY flag to be 1
-	// - set ADSTART to 1
-	stm32.ADC.ISR.Set(stm32.ADC_ISR_ADRDY)             // clear ADRDY bit
-	stm32.ADC.CR.Set(stm32.ADC_CR_ADEN)                // enable ADC
-	for stm32.ADC.ISR.Get()&stm32.ADC_ISR_ADRDY == 0 { // wait until it is enabled
-	}
-
-	// Select the channel.
-	stm32.ADC.CHSELR.Set(1 << 8) // PB0=ADC_IN8
-
-	// Enable a timer, for use with the DMA.
-	stm32.RCC.SetAPB2ENR_TIM22EN(1)
-	stm32.TIM22.PSC.Set(clockPrescaler) // prescale so it counts at twice the samplerate
-	stm32.TIM22.ARR.Set(1)              // wraparound every other clock cycle
-	stm32.TIM22.CR1.Set(stm32.TIM_CR1_CEN)
-	stm32.TIM22.CR2.Set(stm32.TIM_CR2_MMS_Update << stm32.TIM_CR2_MMS_Pos)
-
-	// Debug: slow down the ADC
-	//stm32.TIM22.PSC.Set(0xffff)
-	//stm32.TIM22.ARR.Set(1)
-
-	// Configure DMA.
-	stm32.RCC.AHBENR.SetBits(stm32.RCC_AHBENR_DMAEN)
-	stm32.DMA1.CH[0].PAR.Set(uint32(uintptr(unsafe.Pointer(&stm32.ADC.DR))))
-	stm32.DMA1.CH[0].MAR.Set(uint32(uintptr(unsafe.Pointer(&adcData))))
-	stm32.DMA1.CH[0].NDTR.Set(uint32(len(adcData)))
-	stm32.DMA1.CH[0].CR.Set(stm32.DMA_CH_CR_MINC | stm32.DMA_CH_CR_MSIZE_Bits16<<stm32.DMA_CH_CR_MSIZE_Pos | stm32.DMA_CH_CR_PSIZE_Bits16<<stm32.DMA_CH_CR_PSIZE_Pos | stm32.DMA_CH_CR_TEIE | stm32.DMA_CH_CR_CIRC)
-	stm32.DMA1.CH[0].CR.SetBits(stm32.DMA_CH_CR_EN)
-
-	// Set the ADC to trigger from DMA.
-	stm32.ADC.CFGR1.Set(stm32.ADC_CFGR1_DMAEN | stm32.ADC_CFGR1_DMACFG | stm32.ADC_CFGR1_EXTSEL_TIM22_TRGO<<stm32.ADC_CFGR1_EXTSEL_Pos | stm32.ADC_CFGR1_EXTEN_RisingEdge<<stm32.ADC_CFGR1_EXTEN_Pos)
-	stm32.ADC.CFGR2.SetBits(0 |
-		stm32.ADC_CFGR2_OVSE |
-		1<<stm32.ADC_CFGR2_OVSS_Pos |
-		stm32.ADC_CFGR2_OVSR_Mul32<<stm32.ADC_CFGR2_OVSR_Pos)
-
-	// Start the ADC!
-	stm32.ADC.CR.Set(stm32.ADC_CR_ADEN | stm32.ADC_CR_ADSTART)
+	// Capture: the double symbol buffer (windowSize*2 samples) at 10 kSPS,
+	// ADCPRE=AHB/1 (ccr=0): at this clock the ADC is within spec and the 32x
+	// oversampled conversion (~95 µs) just fits the 100 µs sample period.
+	// See capture.go for the shared setup this replaced.
+	//
+	// Debug: slow down the ADC by raising the prescaler, e.g. 0xffff.
+	startCapture(uint32(uintptr(unsafe.Pointer(&adcData))), len(adcData),
+		clockPrescaler, 0)
 
 	// Special marker used by the Goertzel implementation to know this is the
 	// end of the array.
@@ -214,22 +184,8 @@ func dataRecv(slot int) {
 	decoder.Initialize(animationBuf[1:], maxProgramSize, sampleRate)
 	receiveData(slot)
 
-	// Disable everything again.
-
-	// Shut down DMA.
-	stm32.RCC.AHBENR.ClearBits(stm32.RCC_AHBENR_DMAEN)
-
-	// Shut down ADC.
-	stm32.RCC.APB2RSTR.Set(stm32.RCC_APB2RSTR_ADCRST)
-	stm32.RCC.APB2RSTR.Set(0)
-	stm32.RCC.SetAPB2ENR_ADCEN(0)
-	stm32.RCC.SetCFGR_PPRE2(stm32.RCC_CFGR_PPRE2_Div16)
-
-	// Shut down timer.
-	stm32.RCC.SetAPB2ENR_TIM22EN(0)
-
-	// Disable power to the microphone.
-	micPin.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
+	// Disable capture, then restore the idle clock.
+	stopCapture()
 
 	// Switch back to MSI.
 	stm32.RCC.CFGR.ReplaceBits(stm32.RCC_CFGR_SWS_MSI, stm32.RCC_CFGR_SW_Msk, 0)

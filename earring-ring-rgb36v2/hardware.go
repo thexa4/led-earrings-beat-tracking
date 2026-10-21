@@ -3,11 +3,13 @@
 package main
 
 import (
+	"unsafe"
+
+	"codeberg.org/maaike328p/datatrans/ecc"
 	"device/arm"
 	"device/stm32"
 	"machine"
 	"runtime/volatile"
-	"unsafe"
 )
 
 const (
@@ -298,18 +300,32 @@ func saveState() {
 	flashWrite(flashDataEnd-flashPageSize, storedState[:])
 }
 
-// Get FNV-1a hash of the given memory buffer.
+// Hash of a memory buffer, used for the stored-state page and the pattern
+// slot headers.
 //
-// https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function#FNV-1a_hash
+// This wraps the MurmurHash32 from the datatrans ECC package, which the
+// fountain decoder already links: the old standalone FNV-1a loop was a
+// second hash function costing 420 B of its own. Buffers that are not a
+// multiple of 4 bytes hash their tail bytes with an FNV step, and the
+// length is folded in so trailing zero bytes cannot go unnoticed.
+//
+// The []uint32 view requires 4-byte alignment, which all callers provide:
+// storedState is //go:align 4, and the pattern byte slices are backed by
+// animationBuf ([]uint32) at a word offset. Changing this function changes
+// every stored hash: after a firmware update with a different hash, the
+// state page resets to defaults and stored patterns read as empty (they
+// need to be re-received).
 //
 //go:noinline
 func hash32(buf []byte) uint32 {
-	var result uint32 = 2166136261 // FNV offset basis
-	for _, c := range buf {
-		result ^= uint32(c) // XOR with byte
-		result *= 16777619  // FNV prime
+	words := len(buf) / 4
+	h := ecc.MurmurHash32(
+		unsafe.Slice((*uint32)(unsafe.Pointer(unsafe.SliceData(buf))), words), 0)
+	for _, c := range buf[words*4:] {
+		h ^= uint32(c)
+		h *= 16777619
 	}
-	return result
+	return h ^ uint32(len(buf))
 }
 
 //go:noinline

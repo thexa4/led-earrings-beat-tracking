@@ -66,6 +66,33 @@ func halfGain(w []uint16, _ *int32) {
 	}
 }
 
+// quiet models the measured bench operating point: the music reaches the
+// microphone as a few tens of ADC counts (-42 dB here, which is what a loud
+// speaker 1 cm from this front end produces). Without input normalization this
+// is where the pipeline stops agreeing with itself: the filter states stall on
+// their own LSBs and the beat tracker locks to a different tempo (see
+// AgcTargetPeak).
+func quiet(w []uint16, _ *int32) {
+	for i, v := range w {
+		w[i] = uint16(32768 + (int32(v)-32768)/64)
+	}
+}
+
+// benchOffset is quiet() plus the real front end's DC: this microphone idles at
+// 0.26 of full scale, not at the mid-rail the pipeline subtracts, so the signal
+// rides on a -15600 count error that the DC blocker has to absorb. Modelled
+// because the two effects interact: the blocker's output is where the stalls
+// happen.
+func benchOffset(w []uint16, _ *int32) {
+	for i, v := range w {
+		y := 17120 + (int32(v)-32768)/64
+		if y < 0 {
+			y = 0
+		}
+		w[i] = uint16(y)
+	}
+}
+
 // hfTilt models hand shadowing: a crude HF *shelf* (+~4 dB) via a one-tap
 // pre-emphasis with cross-frame memory.
 func hfTilt(w []uint16, carry *int32) {
@@ -145,6 +172,8 @@ func TestAgreement(t *testing.T) {
 		{"gain-6dB", halfGain, false},
 		{"hf-tilt", hfTilt, false},
 		{"gain+tilt+drift", combo, true},
+		{"quiet-42dB", quiet, false},
+		{"bench-quiet-offset", benchOffset, false},
 	}
 
 	base := run(newInst(nil, false), testFrames)
