@@ -522,14 +522,19 @@ const (
 	// claim about two things, and the capture has to be falsified first).
 	//
 	// It is worth one more sentence, because this constant is the obvious thing to
-	// reach for and it is nearly spent. Smoothing the deviation the choice is made
-	// on for a further 0.2 s to 1.2 s - measured on a paired RAM dump, renormalised
-	// so the cuts keep meaning the same number of deviations - moves the correlation
-	// in the two earrings' choices from +0.78 to +0.82 and their agreement from 55%
-	// to 58%. That is what a curve flattened out at its plateau looks like: whatever
-	// the two earrings still disagree about is not high-frequency, and buying more of
-	// it costs latency on every colour change. Do not raise this constant hoping for
-	// the old gains.
+	// reach for and it was wrongly declared spent. An earlier note here said smoothing
+	// the deviation a further 0.2 s to 1.2 s moved the correlation in the two earrings'
+	// choices from +0.78 to +0.82 and their agreement from 55% to 58%, and concluded the
+	// curve had flattened. Both the window range and the capture were too short to say
+	// that: it was 43 s of one track, and the smoothing sweep stopped at 1.2 s. Over a
+	// full hour of the podcast, on paired RAM, with the selector replayed to within
+	// about 1% of the devices' own reference and spread, smoothing the deviation for
+	// 16 s rather than 1.2 s is worth eight more points of held-out agreement, and the
+	// curve does not flatten until about 66 s, where it falls off a cliff instead - 66 s
+	// leaves the deviation barely moving, one colour wins everything and the score is
+	// meaningless. See PatternGapShift, which is where that smoothing actually belongs:
+	// this constant changes what the deviation is measured against, and moving it is a
+	// weaker lever than low-passing the deviation itself.
 	PatternCentroidShift = 10
 
 	// PatternScaleShift is the time constant of the centroid's own reference level
@@ -554,7 +559,80 @@ const (
 	// the bench's remaining disagreement is worth attacking at the rig first: one
 	// earring was found sitting with the AGC pinned at zero shift while the other rode
 	// two or three shifts up, which is that twenty dB.
+	//
+	// Left at 10, having been tried at 11. A slower reference was worth +3.8 points of
+	// held-out agreement on the hour (46.8% to 50.6%), and it was reverted anyway, for a
+	// reason that is not in that number: TestAgreement's quiet-offset case is 59 s long,
+	// and a 33 s reference is still two thirds of the way to where it is going at the end
+	// of it. Both devices then carry a large deviation of whatever sign their centroid
+	// happened to start on, which lands them on opposite end buckets for the entire test -
+	// 92% agreement became 0%, deterministically. That is not the test being fussy. The
+	// same transient is visible on hardware in the first minutes of every capture, and
+	// PatternWarmupFrames (8 s) does not begin to cover a reference this slow, so shipping
+	// 11 would mean shipping a longer version of a problem already known to be there. It
+	// is recorded as a measured preference only: the +8 points from PatternGapShift do not
+	// need it, and were re-measured with this constant at 10.
 	PatternScaleShift = 10
+
+	// PatternGapShift is the time constant of a low-pass applied to the centroid's
+	// deviation from its reference, after the deviation has been formed and before
+	// either the spread or the bucket sees it. As a shift, so 10 is ~16 s at 62.5 Hz.
+	//
+	// This is a different lever from PatternScaleShift and it is important not to
+	// confuse them: the reference's time constant changes what the deviation is measured
+	// *against*, which changes the meaning of the colour, while this one leaves the
+	// meaning alone and averages the thing being judged. The disagreement between two
+	// earrings is noise rather than offset, and averaging a noisy decision is what an
+	// integrator is for.
+	//
+	// Measured on an hour of the podcast through a replay of the firmware's own integer
+	// arithmetic, fitted on the first half and scored on the second, with every candidate
+	// required to keep all four colours above 15% occupancy and both devices above 0.06
+	// changes per second - those two constraints are what stop the obvious cheat, since a
+	// deviation low-passed long enough stops moving and two statues agree perfectly:
+	//
+	// The reference and spread were at their shipped value for this table, and the winner
+	// was re-checked with them there rather than at the sweep's best combination:
+	//
+	//	smoothing   held-out   kappa   weakest colour   changes/s
+	//	off           46.8%    +0.290        19.4%        0.09 / 0.13
+	//	1 s           47.2%    +0.295        19.5%        0.08 / 0.10
+	//	4 s           49.1%    +0.321        19.5%        0.07 / 0.07
+	//	16 s          54.4%    +0.381        14.7%        0.04 / 0.04
+	//	66 s          45.2%    +0.001         0.0%        0.01 / 0.01
+	//
+	// 16 s is a real optimum rather than the top of a monotone curve: at 66 s the
+	// buckets empty, one device spends 68% of the scored half-hour in a single colour
+	// and kappa falls to +0.001, which is worse than doing nothing. The cost is
+	// honest and is the reason this is a decision rather than a free win - a colour
+	// now changes about half as often, every 20 s instead of every 10, and per-minute
+	// scoring shows the gain coming mostly from passages where the pair already
+	// agreed rather than from fixing the three five-minute stretches where the two
+	// microphones genuinely hear different music (correlation near zero there, and no
+	// filter recovers a signal that is not shared).
+	//
+	// The ruler matters as much as the low-pass, and the two have to be reported
+	// together: this table divides by the spread of the raw deviation, which is what
+	// ships. Dividing instead by the spread of the *smoothed* deviation scores a hair
+	// better on the hour (54.9% held out, and a healthier 21.1% in the weakest
+	// colour) and is not shipped, because on real music it leaves 1% of frames at the
+	// +-2 clamp, where a reading has stopped being a measurement, while the raw ruler
+	// leaves essentially none. That clamp is exactly where this change hurts, and it
+	// hurts in a way worth recording rather than re-litigating:
+	// TestAgreement/bench-quiet-offset goes from 92% pattern agreement to 0%. That
+	// case is 36 dB of attenuation *plus* the microphone's real 0.26-of-full-scale
+	// idle, which leaves a 512-count signal sitting on a 17120-count pedestal where
+	// the DC blocker's integer EMA stalls, and the two devices' smoothed spectra
+	// differ by up to 2300 counts (9 dB) on 6% of frames. Their centroids correlate
+	// at +0.38 there, against +0.999 for the attenuation alone, so no reference,
+	// spread or set of cut points can make them agree: the only selector that passes
+	// declines to choose, and that is what the shipped one was doing, spending 2526
+	// of 3676 frames in the middle pattern on four commits and reading the same 92%
+	// whether the cuts sat at 216, 215 or 210. The case already failed on anchor F1
+	// and steady hash distance before this change and still does; what changed is
+	// that its pattern number stopped being vacuous. The same change moves
+	// TestAgreement/gain+tilt+drift, the realistic worst case, from failing to 100%.
+	PatternGapShift = 10
 
 	// PatternCentroidScale is extra headroom on the stored centroid. An EMA updated
 	// at 1/1024 per frame loses anything it is asked to track below ~1024 units, so

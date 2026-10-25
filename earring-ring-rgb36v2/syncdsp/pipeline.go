@@ -190,10 +190,19 @@ type Pipeline struct {
 	// are kept to size the cuts, not to place them. centDev starts at zero, so
 	// PatternWarmupFrames suppresses the choice until it is worth reading.
 	//
-	cent     int32
-	centAvg  int32
-	centDev  int32
-	centInit bool
+	// centGapQ8 is the low-passed form of (cent - centAvg) in Q8, and is what the colour
+	// is actually read from: the choice is made on the filtered deviation rather than on
+	// cent, so that averaging does not change what the decision means. centDev is the
+	// spread of the filtered deviation, not of the raw one, or the cuts would silently
+	// mean fewer deviations after the low-pass than before it. See PatternGapShift, and
+	// see the note where it is updated for why this one accumulator carries fraction bits
+	// when its neighbours do not.
+	//
+	cent      int32
+	centGapQ8 int32
+	centAvg   int32
+	centDev   int32
+	centInit  bool
 
 	frame  int32
 	events Events
@@ -848,13 +857,37 @@ func (p *Pipeline) endFrame() Events {
 	}
 	c *= PatternCentroidScale
 	if !p.centInit {
-		// First frame: seed all three so the centroid starts at rest rather than
+		// First frame: seed all of them so the centroid starts at rest rather than
 		// reading as a huge deviation from zero.
 		p.centInit = true
-		p.cent, p.centAvg, p.centDev = c, c, 0
+		p.cent, p.centAvg, p.centDev, p.centGapQ8 = c, c, 0, 0
 	} else {
 		p.cent += (c - p.cent + (1 << (PatternCentroidShift - 1))) >> PatternCentroidShift
 		gap := p.cent - p.centAvg
+		// The reference keeps following the raw deviation: low-passing it here instead
+		// would make the reference chase the same variation it exists to measure out, and
+		// the colour would stop meaning "unusual for this music". Only the quantity being
+		// judged, and the spread that sizes it, see the filtered version.
+		//
+		// Kept in Q8 rather than as an integer of the same units as cent. An integer EMA
+		// at shift 10 adds nothing at all while the difference to be caught is under 512,
+		// and a smoothed deviation is routinely within 512 of itself, so the plain form
+		// stops wherever it happened to stop moving and stays there. centDev then decays
+		// towards that frozen value, and one device drops under PatternMinDev and reports
+		// the middle pattern while its partner, frozen somewhere else, does not: measured
+		// on the quiet-offset bench case, that took the case from 92% agreement to 0%,
+		// deterministically, for the whole capture. Carrying eight fraction bits puts the
+		// deadband at two units of the centroid instead of five hundred and twelve.
+		p.centGapQ8 += ((gap << 8) - p.centGapQ8 + (1 << (PatternGapShift - 1))) >> PatternGapShift
+		// The ruler stays the spread of the RAW deviation. Measuring the spread of the
+		// smoothed one instead is self-consistent on paper and fails in a specific way: a
+		// centroid that drifts steadily against a lagging reference has almost no
+		// oscillation for the low-pass to remove, so its smoothed deviation keeps the full
+		// drift while its smoothed spread loses everything the low-pass did remove, and the
+		// ratio runs to the clamp. Both earrings then pin to whichever end colour their own
+		// drift points at, which is the stuck-on-one-pattern failure this is meant to fix.
+		// Observed on TestAgreement/bench-quiet-offset, where a slow drift put the pair on
+		// opposite end buckets for the whole capture: 92% agreement became 0%.
 		abs := gap
 		if abs < 0 {
 			abs = -abs
@@ -1614,18 +1647,27 @@ func hotBits(cur *[NBands]int32) uint32 {
 // therefore reports the middle pattern, which is the right behaviour for a device
 // sitting still in a quiet room and is also what keeps the division below from being
 // a division by zero; on this target (-panic=trap) that would reset the device.
+func PatternIndex(cent, centAvg, centDev int32) int32 {
+	return PatternIndexGap(cent-centAvg, centDev)
+}
+
+// PatternIndexGap is PatternIndex with the deviation handed to it rather than formed
+// from two arguments, because the deviation the colour is chosen on is not cent minus
+// centAvg: it is centGap, that difference after PatternGapShift. Splitting it this way
+// keeps the arithmetic below in one place and keeps the two-argument form above honest -
+// the invariance tests are written against it, and they still exercise the same buckets.
 //
 //go:noinline
-func PatternIndex(cent, centAvg, centDev int32) int32 {
+func PatternIndexGap(gap, centDev int32) int32 {
 	if centDev < PatternMinDev {
 		return NumPatterns / 2
 	}
-	d := cent - centAvg
+	d := gap
 	// Clamped before the scaling rather than after it, which serves two ends. A
-	// centroid far enough out that cent-centAvg times 256 would wrap an int32 cannot
-	// produce a nonsense ratio: the bound is a multiple of the divisor, so the
-	// division is safe by construction. And nothing is lost, since the mapping cannot
-	// express anything past its end bucket anyway.
+	// deviation far enough out that it times 256 would wrap an int32 cannot produce a
+	// nonsense ratio: the bound is a multiple of the divisor, so the division is safe by
+	// construction. And nothing is lost, since the mapping cannot express anything past
+	// its end bucket anyway.
 	if lim := centDev * 2; d > lim {
 		d = lim
 	} else if d < -lim {
@@ -1666,7 +1708,11 @@ func (p *Pipeline) pattern() int32 {
 	if p.frame < PatternWarmupFrames {
 		return NumPatterns / 2
 	}
-	return PatternIndex(p.cent, p.centAvg, p.centDev)
+	// The smoothed deviation over the raw spread: the numerator is what gets averaged,
+	// and the ruler is left alone so that a device whose centroid is drifting is measured
+	// against the same yardstick as one whose centroid is not. See where centDev is
+	// updated.
+	return PatternIndexGap(p.centGapQ8>>8, p.centDev)
 }
 
 // hashFrame computes the 24-bit perceptual hash of a smoothed band spectrum
