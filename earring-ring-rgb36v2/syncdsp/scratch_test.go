@@ -1,9 +1,20 @@
 package syncdsp
 
-// Scratch experiment (delete or promote): distribution of the per-frame loudness
+// Diagnostic, kept deliberately: distribution of the per-frame loudness
 // deviation, with and without the measured impulses, to see whether the depth
 // feature's response to impulses is a few outlier frames (fixable with a
 // frame-rate median) or a broad shift (not fixable that way).
+//
+// It answers its own question, and the answer is "neither": adding the impulse
+// set moves |dev| p50 from 0.12 to 0.20 bits and leaves p90 and the maximum
+// essentially unchanged (4.79 -> 4.55, max 6.35 -> 6.11) on music at -24 dB. The
+// impulses do not shift the distribution and are not hiding in its tail, so a
+// median over frames would buy nothing here. That is why this stays a printed
+// readout with no assertions: the useful result is a null, and pinning it to a
+// threshold would only make it break.
+//
+// See scratch_ratio_test.go, which asks the neighbouring question at sample rate
+// and does NOT currently answer it.
 
 import (
 	"fmt"

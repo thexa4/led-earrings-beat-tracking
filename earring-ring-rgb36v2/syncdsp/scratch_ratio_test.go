@@ -15,6 +15,19 @@ import (
 // The question is whether the tail of the music's own distribution reaches into
 // the impulses'. Reported in "times the neighbourhood median", as percentiles over
 // the whole run, plus the largest value seen.
+//
+// AS OF TODAY THIS MEASURES NOTHING AND ITS OUTPUT MUST NOT BE QUOTED. Every
+// music row reports "(no fixture)" - the audio it was written against is not in
+// the tree - so the only rows it prints are the quiet ones, and on those the
+// neighbourhood median is routinely zero, which the divide guard turns into
+// int32 max. The reported p99 and above are that sentinel, not a percentile:
+// "p99 = 2147483647" on a room-noise row is a division by zero wearing a number.
+// It passes because it asserts nothing, which is the failure mode to watch for in
+// a diagnostic: green here means it ran, not that it learned anything.
+//
+// Fixing it means restoring a music fixture and clipping the ratio at something
+// finite so a saturated denominator is visible as itself. Until then,
+// scratch_test.go is the one to read.
 func TestScratchRatio(t *testing.T) {
 	const frames = 4 * synthSection / Window
 
