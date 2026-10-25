@@ -218,6 +218,16 @@ blame physics.
   and you reach it through a local forward, set `FLASH_HOST=localhost`.
 - Commands that flash (`tools/flash.sh`) kill and do not restart the debug servers.
   Restart them after every flash or the next tool fails confusingly.
+- **Watch the target voltage across sessions, not just within one.** Both earrings
+  reported 3.273 V and 3.253 V for a long time; measured later they read 3.254 V and
+  3.248 V, and the right one had become unwritable — `Fail reading CTRL/STAT` on
+  every attempt, plain or under reset. The absolute number still looks fine, which is
+  why it reads like a tooling fault. Compare against the historical value before
+  believing the adapters.
+- `tools/flash.sh` falls back to `reset_config srst_only connect_assert_srst` at
+  100 kHz and says so on stderr when it has to. That fallback is a symptom, not a
+  fix: a healthy earring never needs it, and a cell low enough to need it may still
+  fail the write. Treat the message as "replace this cell".
 - Use absolute paths in automation: the shell's cwd is not guaranteed to persist
   between commands, and a stripped `cd` silently runs the wrong tool from the wrong
   tree.

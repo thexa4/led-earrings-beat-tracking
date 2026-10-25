@@ -49,6 +49,23 @@ esac
 
 REMOTE=/tmp/flash-$$.hex
 
+# Write $REMOTE through the adapter on USB port $port. $1 is extra openocd
+# options, interpolated into the remote command line so the remote shell sees
+# them as separate quoted arguments.
+write() {
+	ssh "$HOST" "openocd -c 'adapter usb location $port' \
+			-f interface/stlink.cfg -f target/stm32l0.cfg $1 \
+			-c 'program $REMOTE verify reset exit'"
+}
+
+# A healthy earring takes the plain form. This one only answers with SRST held
+# and the link slowed to 100 kHz, which is a tired cell rather than wiring: the
+# targets used to report 3.273/3.253 V and now read 3.254/3.248. Kept as a
+# fallback instead of the default so a healthy device still flashes the fast way
+# and a device that needs it says so in the log.
+SRST="-c 'reset_config srst_only connect_assert_srst' -c 'adapter speed 100' \
+	-c 'init' -c 'halt'"
+
 for hex in "$@"; do
 	[ -f "$hex" ] || { echo "$SELF: no such file: $hex" >&2; exit 1; }
 	echo "== $hex -> $HOST (${TARGETS[*]})"
@@ -56,10 +73,10 @@ for hex in "$@"; do
 	status=0
 	for port in "${TARGETS[@]}"; do
 		ssh "$HOST" 'pkill -x openocd' 2>/dev/null && sleep 1
-		if ssh "$HOST" "openocd -c 'adapter usb location $port' \
-				-f interface/stlink.cfg -f target/stm32l0.cfg \
-				-c 'program $REMOTE verify reset exit'"; then
+		if write ""; then
 			echo "== $port: OK"
+		elif write "$SRST"; then
+			echo "== $port: OK (needed SRST at 100 kHz: this cell is tired)" >&2
 		else
 			echo "== $port: FAILED" >&2
 			status=1
