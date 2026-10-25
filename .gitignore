@@ -6,3 +6,9 @@ datasheet/
 
 # Build artifacts
 earring-ring-rgb36v2/firmware.elf
+earring-ring-rgb36v2/hosttrace
+earring-ring-rgb36v2/tools/hosttrace/hosttrace
+scream/tools/screamcheck/screamcheck
+
+# Python bytecode from tools/
+__pycache__/
