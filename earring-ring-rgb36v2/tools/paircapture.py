@@ -132,10 +132,18 @@ class PipeState:
     that parser for the same reason.
     """
 
-    NAMES = {"cent", "centAvg", "centDev", "smooth", "agcShift", "frame",
-             "lastPattern"}
-    FIELDS = ["t", "cent", "centAvg", "centDev", "pat", "frame", "agc"] + \
-             [f"b{i}" for i in range(8)]
+    # centGapQ8 is the low-passed deviation the selector actually decides on. It is
+    # recorded because without it a replay has to simulate that low-pass from the raw
+    # centroid, and then the one quantity whose tuning was chosen offline is the one
+    # quantity never observed on a device running the code that uses it - every
+    # comparison is against a device running something older.
+    NAMES = {"cent", "centGapQ8", "centAvg", "centDev", "smooth", "agcShift",
+             "frame", "lastPattern"}
+    FIELDS = ["t", "cent", "gapQ8", "centAvg", "centDev", "pat", "frame",
+              "agc"] + [f"b{i}" for i in range(8)]
+
+    # How many polls to watch before deciding the offsets are wrong.
+    CHECK_SAMPLES = 25
 
     def __init__(self, elf):
         import patternstate
@@ -147,6 +155,56 @@ class PipeState:
         syms = telem.resolve_symbols(elf)
         self.addr = syms[next(k for k in syms if k.endswith("main.syncPipe"))]
         self.words = max(self.off.values()) // 4 + 2
+        self._n = 0
+        self._advances = False
+        self._prev_frame = None
+        self._bad = []
+
+    def _check(self, row):
+        """Stop early if the ELF does not describe the image on the device.
+
+        A stale ELF passes this class's own constructor check: it asks DWARF for
+        member offsets and stale DWARF answers cheerfully, just four bytes wrong.
+        Inserting one field into Pipeline shifts every member after it - centGapQ8
+        went in at 1012 and took centAvg, centDev and frame with it - and the
+        output is not an exception and not obviously nonsense. The band energies
+        sit before the shift and stay exactly right, `pat` still lands in 0..3, and
+        the file fills up at the expected rate, so a whole hour gets recorded and
+        then scored into a plausible number computed from the wrong columns. It
+        measured 63% agreement between two earrings that were never being read.
+
+        So check two things that only the correct words can satisfy, both true by
+        construction in the firmware: `frame` counts analysis frames at 62.5 Hz and
+        cannot sit still on a running device, and `centDev` is an exponential
+        average of an absolute value and so cannot be negative. Caught in the
+        first few seconds, which is the point: the alternative is finding out after
+        the hour.
+        """
+        self._n += 1
+        if row["centDev"] < 0 and not any("centDev" in b for b in self._bad):
+            self._bad.append(
+                f"centDev read {row['centDev']}, negative: it is an average of an "
+                f"absolute value and cannot be")
+        if self._prev_frame is not None and row["frame"] > self._prev_frame:
+            self._advances = True
+        self._prev_frame = row["frame"]
+        if self._n != self.CHECK_SAMPLES:
+            return
+        if not self._advances:
+            self._bad.append(
+                f"frame never advanced from {self._prev_frame} over "
+                f"{self.CHECK_SAMPLES} polls: it counts analysis frames")
+        if self._bad:
+            raise SystemExit(
+                "state read is inconsistent with the firmware:\n  " +
+                "\n  ".join(self._bad) +
+                "\nThe ELF almost certainly does not match the image on the "
+                f"device.\nRebuild both from the same tree and prove it before "
+                "capturing:\n"
+                "  tinygo build -o firmware.elf -target=./stm32l0x1.json "
+                "-opt=2 -panic=trap .\n"
+                "  objcopy -O ihex firmware.elf /tmp/check.hex   # must equal "
+                "the flashed hex\n")
 
     def sample(self, ocd, t):
         w = ocd.mdw(self.addr, self.words)
@@ -154,13 +212,14 @@ class PipeState:
         def g(name):
             return struct.unpack("<i", struct.pack("<I", w[self.off[name] // 4]))[0]
 
-        row = dict(t=round(t, 3), cent=g("cent"), centAvg=g("centAvg"),
-                   centDev=g("centDev"), pat=g("lastPattern"),
-                   frame=g("frame"), agc=g("agcShift"))
+        row = dict(t=round(t, 3), cent=g("cent"), gapQ8=g("centGapQ8"),
+                   centAvg=g("centAvg"), centDev=g("centDev"),
+                   pat=g("lastPattern"), frame=g("frame"), agc=g("agcShift"))
         base = self.off["smooth"] // 4
         for i in range(8):
             row[f"b{i}"] = struct.unpack("<i",
                                          struct.pack("<I", w[base + i]))[0]
+        self._check(row)
         return row
 
 
