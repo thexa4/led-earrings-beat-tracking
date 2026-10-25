@@ -307,15 +307,20 @@ func TestHashDeadband(t *testing.T) {
 	if h := hashFrame(cur, old, &dev) & ((1 << NBands) - 1); h != 0 {
 		t.Errorf("identical flat frames should have no temporal bits, got %015b", h)
 	}
-	// 1 dB up in band 3 (256 Q8 log2 == 6.02 dB): below the 3 dB deadband.
-	old[3] = cur[3] - 256/6
+	// Half the deadband must never flip; twice it must. Expressed through the
+	// constant rather than hard-coded dB: the threshold was retuned from 3 dB
+	// to 0.75 dB by the podcast-wide sweep (tools/hashsweep.py), and a test
+	// that names the old number guards nothing after a retune.
+	old[3] = cur[3] - TemporalDeadband/2
 	if h := hashFrame(cur, old, &dev); h&(1<<3) != 0 {
-		t.Errorf("1 dB change flipped a temporal bit: %015b", h)
+		t.Errorf("change of %d Q8 (half the %d deadband) flipped a temporal bit: %015b",
+			TemporalDeadband/2, TemporalDeadband, h)
 	}
-	// 6 dB up: must flip.
-	old[3] = cur[3] - 256
+	// Well above the deadband: must flip.
+	old[3] = cur[3] - 2*TemporalDeadband
 	if h := hashFrame(cur, old, &dev); h&(1<<3) == 0 {
-		t.Errorf("6 dB change did not flip: %015b", h)
+		t.Errorf("change of %d Q8 (twice the deadband) did not flip: %015b",
+			2*TemporalDeadband, h)
 	}
 }
 
@@ -484,4 +489,65 @@ func TestHashEntropy(t *testing.T) {
 	}
 	t.Logf("entropy: %d distinct words, mean popcount %.2f, steady-repeat %.0f%%",
 		len(seen), avgBits, 100*float64(steadySame)/math.Max(float64(steady), 1))
+}
+
+// TestMedianNetwork checks the nine-comparator network that feed uses to find the
+// middle of five. It is short enough to check exhaustively over every ordering,
+// which is the only way to be sure: a network that is wrong for one permutation
+// is wrong silently, and its output is a plausible-looking sample.
+func TestMedianNetwork(t *testing.T) {
+	med := func(a, b, c, d, e int32) int32 {
+		if a > b {
+			a, b = b, a
+		}
+		if d > e {
+			d, e = e, d
+		}
+		if c > e {
+			c, e = e, c
+		}
+		if c > d {
+			c, d = d, c
+		}
+		if a > d {
+			a, d = d, a
+		}
+		if a > c {
+			a, c = c, a
+		}
+		if b > e {
+			b, e = e, b
+		}
+		if b > d {
+			b, d = d, b
+		}
+		if b > c {
+			b, c = c, b
+		}
+		return c
+	}
+	var vals [5]int32
+	var rec func(k int)
+	rec = func(k int) {
+		if k == 5 {
+			got := med(vals[0], vals[1], vals[2], vals[3], vals[4])
+			want := append([]int32{}, vals[:]...)
+			for i := range want {
+				for j := i + 1; j < len(want); j++ {
+					if want[j] < want[i] {
+						want[i], want[j] = want[j], want[i]
+					}
+				}
+			}
+			if got != want[2] {
+				t.Fatalf("median of %v = %d, want %d", vals, got, want[2])
+			}
+			return
+		}
+		for v := range 5 {
+			vals[k] = int32(v)
+			rec(k + 1)
+		}
+	}
+	rec(0)
 }

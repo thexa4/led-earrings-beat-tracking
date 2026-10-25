@@ -66,6 +66,33 @@ func halfGain(w []uint16, _ *int32) {
 	}
 }
 
+// quiet models the measured bench operating point: the music reaches the
+// microphone as a few tens of ADC counts (-42 dB here, which is what a loud
+// speaker 1 cm from this front end produces). Without input normalization this
+// is where the pipeline stops agreeing with itself: the filter states stall on
+// their own LSBs and the beat tracker locks to a different tempo (see
+// AgcTargetPeak).
+func quiet(w []uint16, _ *int32) {
+	for i, v := range w {
+		w[i] = uint16(32768 + (int32(v)-32768)/64)
+	}
+}
+
+// benchOffset is quiet() plus the real front end's DC: this microphone idles at
+// 0.26 of full scale, not at the mid-rail the pipeline subtracts, so the signal
+// rides on a -15600 count error that the DC blocker has to absorb. Modelled
+// because the two effects interact: the blocker's output is where the stalls
+// happen.
+func benchOffset(w []uint16, _ *int32) {
+	for i, v := range w {
+		y := 17120 + (int32(v)-32768)/64
+		if y < 0 {
+			y = 0
+		}
+		w[i] = uint16(y)
+	}
+}
+
 // hfTilt models hand shadowing: a crude HF *shelf* (+~4 dB) via a one-tap
 // pre-emphasis with cross-frame memory.
 func hfTilt(w []uint16, carry *int32) {
@@ -145,6 +172,8 @@ func TestAgreement(t *testing.T) {
 		{"gain-6dB", halfGain, false},
 		{"hf-tilt", hfTilt, false},
 		{"gain+tilt+drift", combo, true},
+		{"quiet-42dB", quiet, false},
+		{"bench-quiet-offset", benchOffset, false},
 	}
 
 	base := run(newInst(nil, false), testFrames)
@@ -356,92 +385,217 @@ func TestGolden(t *testing.T) {
 	}
 }
 
-// TestPatternIndexStable checks the pattern choice: in range, one pattern per
-// band, gain invariant, and unmoved by perturbations small enough that no band
-// actually changes rank.
-func TestPatternIndexStable(t *testing.T) {
-	if NumPatterns != NBands-1 {
-		t.Errorf("NumPatterns = %d, want NBands-1 = %d: the mapping is one pattern per band", NumPatterns, NBands-1)
+// TestPatternWeightsRamp checks the weights that collapse the spectrum into one
+// number, which is where the design of the pattern choice actually lives.
+//
+// The ramp has to run monotonically from treble to bass: that ordering is what
+// makes two earrings that disagree land on neighbouring colours instead of on
+// opposite ones, and a single transposed weight would break it silently. It has
+// to sum to zero, because that is what makes a flat spectrum - and, with it, any
+// gain the AGC has put on the frame, since a gain adds the same amount to every
+// band - produce no deviation at all rather than a bias towards one end.
+func TestPatternWeightsRamp(t *testing.T) {
+	if len(PatternWeights) != NBands {
+		t.Fatalf("PatternWeights covers %d bands, the spectrum has %d", len(PatternWeights), NBands)
 	}
-	vectors := [][NBands]int32{
-		{4100, 4600, 4900, 4700, 4300, 3900, 3600, 5200}, // mids
-		{5400, 4300, 4100, 4000, 3900, 3800, 3700, 5100}, // air
-		{3900, 4000, 4200, 4400, 4700, 5000, 5300, 5100}, // low mids
-		{4500, 4500, 4500, 4500, 4500, 4500, 4500, 4500}, // flat
-		{4000, 4100, 4200, 5200, 4200, 4100, 4000, 5000}, // band 3 lead
-		{4000, 5000, 4200, 4100, 4100, 4100, 4100, 5000}, // band 1 lead
-	}
-	seen := map[int32]bool{}
-	for _, v := range vectors {
-		dev := spectralDevs(&v)
-		pat := PatternIndex(&dev)
-		if pat < 0 || pat >= NumPatterns {
-			t.Fatalf("pattern %d out of range for %v", pat, v)
-		}
-		seen[pat] = true
-		// Gain invariance: the same spectrum at another level.
-		for _, off := range []int32{-2000, -300, 900, 6000} {
-			var w [NBands]int32
-			copy(w[:], v[:])
-			for b := range w {
-				w[b] += off
-			}
-			d2 := spectralDevs(&w)
-			if p2 := PatternIndex(&d2); p2 != pat {
-				t.Errorf("offset %d changed pattern %d -> %d", off, pat, p2)
-			}
-		}
-		// A perturbation must not move the choice unless it changes the ranking.
-		for b := 0; b < NBands; b++ {
-			for _, eps := range []int32{-64, 64} {
-				var w [NBands]int32
-				copy(w[:], v[:])
-				w[b] += eps
-				d2 := spectralDevs(&w)
-				if p2 := PatternIndex(&d2); p2 != pat && dev[pat]-dev[p2] > 64 {
-					t.Errorf("band %d by %d Q8 log2 flipped pattern %d (gap %.2f dB) -> %d",
-						b, eps, pat, float64(dev[pat]-dev[p2])/256, p2)
-				}
-			}
+	sum := int32(0)
+	for i, w := range PatternWeights {
+		sum += w
+		// PatternWeights is ordered treble first, so it must rise towards the bass.
+		if i > 0 && w <= PatternWeights[i-1] {
+			t.Errorf("weight %d (%d) does not exceed weight %d (%d): the ramp must run up towards the bass",
+				i, w, i-1, PatternWeights[i-1])
 		}
 	}
-	if len(seen) < 4 {
-		t.Errorf("PatternIndex uses only %d of %d patterns", len(seen), NumPatterns)
+	if sum != 0 {
+		t.Errorf("PatternWeights sums to %d, want 0: a flat spectrum must give no deviation", sum)
 	}
 }
 
-// TestPatternHysteresis checks that a band cannot take the pattern from the one
-// on screen without beating it by PatternMargin, and does take it once it does.
+// TestPatternIndexBucket checks the map from the centroid to a pattern: always in
+// range, monotone, using every pattern, and giving up when there is nothing to read.
 //
-// It feeds usePattern deviation arrays directly, which is the domain the
-// function works in: the deviations themselves are what spectralDevs produces
-// and what the margin compares.
-func TestPatternHysteresis(t *testing.T) {
-	// Band 2 dominant, band 3 a clear second but inside the margin.
+// Monotonicity is the property that replaced the candidate-band ranking. The centroid
+// is an ordered quantity, so two earrings are pulled apart by exactly as much as
+// their spectra differ; under the ranking they could sit on opposite colours because
+// one band changed its mind.
+func TestPatternIndexBucket(t *testing.T) {
+	const avg = int32(12000)
+	for _, dev := range []int32{PatternMinDev, 500, 40000} {
+		prev := int32(-1)
+		for cent := int32(-400000); cent <= 400000; cent += 250 {
+			pat := PatternIndex(cent, avg, dev)
+			if pat < 0 || pat >= NumPatterns {
+				t.Fatalf("pattern %d out of range at cent=%d dev=%d", pat, cent, dev)
+			}
+			if pat < prev {
+				t.Fatalf("pattern went backwards: %d then %d at cent=%d dev=%d", prev, pat, cent, dev)
+			}
+			prev = pat
+		}
+	}
+	// Every pattern has to be reachable, or an animation is unreachable on the bench
+	// and the count is a lie.
+	seen := map[int32]bool{}
+	for cent := int32(-400000); cent <= 400000; cent += 250 {
+		seen[PatternIndex(cent, avg, 900)] = true
+	}
+	if len(seen) != NumPatterns {
+		t.Errorf("PatternIndex uses only %d of %d patterns", len(seen), NumPatterns)
+	}
+	// A spectrum with no measurable variation gets no opinion. This is also the guard
+	// that keeps the ratio in PatternIndex from dividing by zero, which on
+	// -panic=trap would reset the device rather than misbehave quietly.
+	for _, c := range [][3]int32{{0, 0, 0}, {12000, 0, 0}, {12000, 12000, 0}, {12000, 12000, PatternMinDev - 1}} {
+		if got := PatternIndex(c[0], c[1], c[2]); got != NumPatterns/2 {
+			t.Errorf("spread %d at cent %d chose %d, want the middle pattern %d",
+				c[2], c[0], got, NumPatterns/2)
+		}
+	}
+	// A wild centroid saturates at an end bucket instead of wrapping past it. The
+	// bound has to hold at magnitudes no real frame reaches, because nothing else in
+	// the path checks the centroid either.
+	for _, big := range []int32{1 << 20, 1 << 28, 1 << 30} {
+		if got := PatternIndex(big, 0, 1<<10); got != NumPatterns-1 {
+			t.Errorf("centroid %d chose %d, want the top pattern %d", big, got, NumPatterns-1)
+		}
+		if got := PatternIndex(-big, 0, 1<<10); got != 0 {
+			t.Errorf("centroid %d chose %d, want the bottom pattern 0", -big, got)
+		}
+	}
+}
+
+// TestPatternDeviceInvariant is the reason the centroid is read against its own
+// running reference and its own spread instead of against fixed thresholds. The two
+// earrings differ in sensitivity, in how much music each microphone hears, and in
+// whatever tilt the AGC settles to - and none of those say which animation the two of
+// them should be showing.
+//
+// Both sweeps are exact rather than approximate. A tilt adds the same constant to
+// cent and to centAvg, so it cancels in the subtraction. A sensitivity scales cent,
+// centAvg and centDev by the same factor, and scaling numerator and denominator
+// together cannot move a truncated quotient: floor(a*n/(b*n)) is floor(a/b).
+func TestPatternDeviceInvariant(t *testing.T) {
+	const dev = int32(900)
+	for _, k := range []int32{-(1 << 24), -50000, 700, 1 << 24} {
+		for cent := int32(-3000); cent <= 3000; cent += 137 {
+			want, got := PatternIndex(cent, 0, dev), PatternIndex(cent+k, k, dev)
+			if got != want {
+				t.Errorf("a tilt of %d moved the pattern %d -> %d at cent=%d", k, want, got, cent)
+			}
+		}
+	}
+	for _, s := range []int32{1, 3, 17, 1024} {
+		for cent := int32(-3000); cent <= 3000; cent += 137 {
+			want, got := PatternIndex(cent, 0, dev), PatternIndex(cent*s, 0, dev*s)
+			if got != want {
+				t.Errorf("a sensitivity of x%d moved the pattern %d -> %d at cent=%d", s, want, got, cent)
+			}
+		}
+	}
+}
+
+// TestPatternStateless pins the property that the hysteresis margin destroyed, and
+// which the fixed cuts restore.
+//
+// The choice must depend on nothing but the centroid, reference and spread handed to
+// it. The margin used to keep the pattern on screen as an incumbent that a challenger
+// had to beat by a clear margin, and since that incumbent is per-device state with no
+// channel between the earrings, the two could disagree forever: the margin (0.19
+// doublings) exceeded the lead the true winner usually holds (0.04-0.10), so once
+// divided neither incumbent ever yielded. Measured on the bench: 57% of the time
+// visibly matching and 36% visibly stuck apart, against 81% matching with the memory
+// removed.
+//
+// This is also why the ruler has to stay derived rather than learned. Anything the two
+// devices converge on separately - a tracked quartile, an incumbent, a per-device
+// threshold - is a source of disagreement that no amount of averaging removes. See
+// PatternCutQ8, where a quartile tracker bought even buckets at the cost of forty
+// points of agreement.
+func TestPatternStateless(t *testing.T) {
+	type in struct{ cent, avg, dev int32 }
+	seq := make([]in, 0, 64)
+	for i := int32(-8); i <= 8; i++ {
+		for _, dev := range []int32{64, 900, 40000} {
+			seq = append(seq, in{i * dev / 3, 12000, dev})
+		}
+	}
+	for _, e := range seq {
+		want := PatternIndex(e.cent, e.avg, e.dev)
+		for repeat := 0; repeat < 3; repeat++ {
+			if got := PatternIndex(e.cent, e.avg, e.dev); got != want {
+				t.Fatalf("PatternIndex(%v) returned %d then %d: the choice has state", e, want, got)
+			}
+		}
+	}
+	// Order must not matter either: the same triple answers the same way whichever
+	// frames came before it.
+	for k := range seq {
+		b := len(seq) - 1 - k
+		if got, want := PatternIndex(seq[b].cent, seq[b].avg, seq[b].dev),
+			PatternIndex(seq[b].cent, seq[b].avg, seq[b].dev); got != want {
+			t.Fatalf("reverse pass unstable at %d", b)
+		}
+	}
+}
+
+// TestPatternConvergesAfterDivergence is the regression test for the failure above,
+// written as the behaviour that matters: two pipelines handed the same spectrum show
+// the same pattern, including after they were handed different ones.
+//
+// It looks redundant next to TestPatternStateless now that the choice is pure. It was
+// written against the incumbent, which is exactly the kind of state that passes a
+// same-input test and still divides two devices, because the input it reads includes
+// what the device was last showing. Keep it for that: any future state in this path
+// has to clear it.
+func TestPatternConvergesAfterDivergence(t *testing.T) {
+	// Two devices driven to opposite ends of the centroid, then handed the same one
+	// again. The spread is well above PatternMinDev so the guard does not answer for
+	// them.
+	const dev = 500
+	dark := PatternIndex(12000+4*dev, 12000, dev)
+	bright := PatternIndex(12000-4*dev, 12000, dev)
+	common := PatternIndex(12000, 12000, dev)
+
+	var a, b Pipeline
+	a.Init()
+	b.Init()
+	a.setPattern(dark)
+	b.setPattern(bright)
+	if a.lastPattern == b.lastPattern {
+		t.Fatalf("the two pipelines did not diverge, so this test proves nothing")
+	}
+	a.setPattern(common)
+	b.setPattern(common)
+	if a.lastPattern != b.lastPattern {
+		t.Errorf("after a shared frame the devices still differ: %d vs %d", a.lastPattern, b.lastPattern)
+	}
+}
+
+// TestPatternSilenceHoldsMiddle is the other half of the guard: a device with
+// nothing to hear has no opinion, and says so with the middle pattern rather than
+// flickering between two on rounding noise.
+//
+// On silence every band sits at the floor pin, so the weighted sum is constant, its
+// deviation collapses towards zero through integer truncation, and the cuts converge
+// onto the same value as the centroid - at which point the answer would be decided
+// entirely by which side of a boundary the last few counts landed on.
+func TestPatternSilenceHoldsMiddle(t *testing.T) {
 	var p Pipeline
 	p.Init()
-	dev := [NBands]int32{-20000, -10000, 0, -4000, -12000, -18000, -22000, -24000}
-	if got := p.usePattern(&dev); got != 2 {
-		t.Fatalf("first choice should be band 2, got %d", got)
+	win := make([]uint16, Window)
+	for range 3000 {
+		mute(win, nil)
+		noisy(3, 7)(win, nil)
+		p.Process(win)
 	}
-	// Band 3 comes within a whisker: not enough to take over.
-	dev[3] = dev[2] - 1000
-	if got := p.usePattern(&dev); got != 2 {
-		t.Errorf("a 1000-unit challenge took the pattern (%d), needs %d", 1000, PatternMargin)
+	if p.centDev < PatternMinDev {
+		t.Logf("spread %d is below the guard %d as expected", p.centDev, PatternMinDev)
+	} else {
+		t.Errorf("on silence the spread grew to %d, above the guard %d: the guard no longer catches a still device",
+			p.centDev, PatternMinDev)
 	}
-	// Just short of the margin: still holds.
-	dev[3] = dev[2] + PatternMargin - 1
-	if got := p.usePattern(&dev); got != 2 {
-		t.Errorf("a challenge of %d took the pattern, needs %d", PatternMargin-1, PatternMargin)
-	}
-	// Over the margin: takes over.
-	dev[3] = dev[2] + PatternMargin
-	if got := p.usePattern(&dev); got != 3 {
-		t.Errorf("a clear win of %d did not take the pattern, got %d", PatternMargin, got)
-	}
-	// Now band 2 has to clear the same margin to win it back, and does not.
-	dev[2] = dev[3] - 1
-	if got := p.usePattern(&dev); got != 3 {
-		t.Errorf("incumbent should defend, got %d", got)
+	if got := p.pattern(); got != NumPatterns/2 {
+		t.Errorf("after 48 s of silence the pattern is %d, want the middle %d", got, NumPatterns/2)
 	}
 }
