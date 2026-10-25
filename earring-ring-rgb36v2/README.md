@@ -2,6 +2,8 @@
 
 These earrings are the successor to my previous [36-LED earrings](../earring-ring-rgb36). The main changes are the addition of a microphone and a second button. The software has also been greatly extended with many new animation patterns.
 
+Before debugging anything measured over SWD - a device that seems deaf, a flat spectrum, a link that will not read - read `BENCH.md` in the repository root first. It says which measurements can lie and how to check them, which is usually the actual problem.
+
 ## Updating firmware
 
 For writing the firmware, you will need an SWD programmer. Both [ST-Link](https://www.aliexpress.com/w/wholesale-st%2525252dlink-v2.html) and DAPLink programmers have been tested and work fine. You can even use a [Raspberry Pi Pico with a special firmware](https://github.com/raspberrypi/debugprobe/releases) as a [programmer](https://pip-assets.raspberrypi.com/categories/610-raspberry-pi-pico/documents/RP-008276-DS-1-getting-started-with-pico.pdf#page=19), use GP2 as SWCLK and GP3 as SWDIO.

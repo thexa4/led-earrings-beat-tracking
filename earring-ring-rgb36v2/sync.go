@@ -186,12 +186,17 @@ func startSync() {
 		stm32.ADC_CFGR2_OVSE |
 		1<<stm32.ADC_CFGR2_OVSS_Pos |
 		stm32.ADC_CFGR2_OVSR_Mul32<<stm32.ADC_CFGR2_OVSR_Pos)
-	// CCR: ADCPRE = AHB/2 (bits 29:28; TinyGo's device/stm32 has no constant
-	// for this part), everything else zero (LFMEN off). The divider matters
-	// now that PCLK is 16 MHz: the datasheet caps the ADC clock at 14 MHz, so
-	// /1 would run it 14% over spec, while /4 (115 µs per trigger) would miss
-	// triggers. /2 is the only setting that is both in spec and fast enough.
-	stm32.ADC.CCR.Set(1 << 28)
+	// CCR is left alone, deliberately, and read back over SWD to confirm: on
+	// this part the only writable bits are PRESC (21:18), VREFEN, TSEN, VLCDEN
+	// and LFMEN (22..25). There is no ADCPRE - that field belongs to the F0/F3
+	// family, and an earlier comment here believed bit 28 was it and wrote
+	// 1<<28 "AHB/2". The write is silently dropped (CCR reads 0), which is also
+	// why the sample rate never changed: the ADC clock comes from CFGR2.CKMODE,
+	// and CKMODE=0 on the L0 is ADCLK = HSI16 asynchronous, 16 MHz here. So the
+	// 32 sub-conversions take 32 x (1.5 + 10.5) = 384 ADC cycles = 24 us, well
+	// inside the 62.5 us sample period, and HSI16 stays on anyway as the system
+	// clock. LFMEN stays off: it is for an ADC clock below 3.5 MHz.
+	stm32.ADC.CCR.Set(0)
 
 	stm32.ADC.CR.Set(stm32.ADC_CR_ADEN | stm32.ADC_CR_ADSTART)
 }
@@ -286,7 +291,11 @@ func syncPoll() {
 	}
 
 	for range avail {
-		syncPipe.ProcessSample(adcData[syncRead])
+		sample := adcData[syncRead]
+		syncPipe.ProcessSample(sample)
+		if micDumpEnabled {
+			micDumpAdd(sample)
+		}
 		syncRead++
 		if syncRead >= syncWindowSize {
 			syncRead = 0
@@ -302,6 +311,9 @@ func syncPoll() {
 	// Frame boundary: the cheap part (~2k cycles: log2, hash, beat tracker,
 	// decisions). Runs at most ~16 times/s.
 	ev := syncPipe.EndFrame()
+	if micDumpEnabled {
+		micDumpUpdateGain() // reads the AGC peak that EndFrame just updated
+	}
 
 	syncAnimFrame++
 	syncBeatAge++

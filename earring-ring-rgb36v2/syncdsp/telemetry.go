@@ -25,6 +25,7 @@ const (
 	// poll at least once per 0.6 s to never lose a frame; Seq gaps make any
 	// loss explicit, and the sticky event fields survive overwrite, so the
 	// event history is never lost, only the spacing between lost frames.
+	// tools/telem.py mirrors this as RECORDS.
 	TelemRecords = 40
 	telemWords   = 4
 )
@@ -61,6 +62,7 @@ var Telem Telemetry
 //
 //	0 onset   1 beat   2 bar   3 anchor   4 pattern-changed
 //	5 locked  6 silent 7 pushed (ring written this frame)  11 host-mark
+//	12 returned (periodicity confirmation)  13 modulating (see ModEnterQ8)
 //	8..10 pattern   16..23 lock votes (clamped)   24..30 period, frames
 const (
 	flagOnset   = 1 << 0
@@ -72,6 +74,8 @@ const (
 	flagSilent  = 1 << 6
 	flagPushed  = 1 << 7
 	flagMark    = 1 << 11
+	flagReturn  = 1 << 12 // periodicity confirmation (Events.Returned)
+	flagMod     = 1 << 13 // modulation-depth gate open: something is playing
 	// notApplicable marks distance fields that were not computed this frame.
 	notApplicable = 0xFF
 )
@@ -117,19 +121,21 @@ func (p *Pipeline) recordTelemetry() {
 	if ev.HashAge == 0 {
 		flags |= flagPushed
 	}
+	if ev.Returned {
+		flags |= flagReturn
+	}
+	if ev.Modulating {
+		flags |= flagMod
+	}
 	if t.HostMark != 0 {
 		t.LastMark = t.HostMark
 		t.HostMark = 0
 		flags |= flagMark
 	}
 	flags |= uint32(ev.Pattern&7) << 8
-	votes := p.beat.Lock
-	if votes < 0 {
-		votes = 0
-	} else if votes > 255 {
-		votes = 255
-	}
-	flags |= uint32(votes) << 16
+	// bit 16..23 used to carry the interval-histogram vote count; the histogram
+	// is gone (see tempoScan) and the field read a constant zero, so nothing is
+	// written here and the tools ignore those bits.
 	period := p.beat.Period
 	if period < 0 {
 		period = 0
@@ -202,7 +208,7 @@ func (p *Pipeline) lagDists(h uint32) (uint32, uint32, uint32) {
 			if prev == 0 {
 				continue
 			}
-			d := uint32(hashDist(h, prev))
+			d := uint32(ringDist(h, prev))
 			if d < out[i] {
 				out[i] = d
 			}

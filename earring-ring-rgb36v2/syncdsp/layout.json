@@ -1,0 +1,63 @@
+{
+  "nbands": 8,
+  "window": 250,
+  "src_hash": "5dd0c504c27e",
+  "fields": {
+    "agcHold": {
+      "offset": 244,
+      "words": 1
+    },
+    "agcPeak": {
+      "offset": 236,
+      "words": 1
+    },
+    "agcShift": {
+      "offset": 240,
+      "words": 1
+    },
+    "energies": {
+      "offset": 204,
+      "words": 8
+    },
+    "filters.energy": {
+      "offset": 64,
+      "words": 8
+    },
+    "fluxFloor": {
+      "offset": 260,
+      "words": 1
+    },
+    "level": {
+      "offset": 280,
+      "words": 1
+    },
+    "linPeak": {
+      "offset": 284,
+      "words": 1
+    },
+    "onsetAge": {
+      "offset": 340,
+      "words": 1
+    },
+    "prevSmooth": {
+      "offset": 140,
+      "words": 8
+    },
+    "prevTotal": {
+      "offset": 252,
+      "words": 1
+    },
+    "smooth": {
+      "offset": 108,
+      "words": 8
+    },
+    "smoothSnap": {
+      "offset": 172,
+      "words": 8
+    },
+    "total": {
+      "offset": 248,
+      "words": 1
+    }
+  }
+}
