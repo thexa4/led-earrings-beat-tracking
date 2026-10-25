@@ -33,10 +33,13 @@ CTRL_HOSTMARK, CTRL_LASTMARK = 3, 4
 CTRL_LASTANCHOR, CTRL_LASTPATTERN, CTRL_LASTLOCK, CTRL_LASTUNLOCK = 5, 6, 7, 8
 CTRL_WORDS, TELEMETRIES_OFFSET = 10, 9  # ring starts at word 9
 
+# Ring depth: must match TelemRecords in syncdsp/telemetry.go.
+RECORDS = 40
+
 # Record layout (4 words), see telemetry.go for the prose version.
 FLAG = dict(onset=1 << 0, beat=1 << 1, bar=1 << 2, anchor=1 << 3,
             pchange=1 << 4, locked=1 << 5, silent=1 << 6, pushed=1 << 7,
-            mark=1 << 11)
+            mark=1 << 11, returned=1 << 12)
 NA = 0xFF  # distance field not computed / no ring entry
 
 
@@ -142,7 +145,7 @@ def decode(seq, words):
         bar=bool(flags & FLAG["bar"]), anchor=bool(flags & FLAG["anchor"]),
         pchange=bool(flags & FLAG["pchange"]), locked=bool(flags & FLAG["locked"]),
         silent=bool(flags & FLAG["silent"]), pushed=bool(flags & FLAG["pushed"]),
-        mark=bool(flags & FLAG["mark"]),
+        mark=bool(flags & FLAG["mark"]), returned=bool(flags & FLAG["returned"]),
         pattern=(flags >> 8) & 7, votes=(flags >> 16) & 0xFF,
         period=(flags >> 24) & 0x7F,
         total=w2 & 0xFFFF, phase=(w2 >> 16) & 0x7F,
@@ -320,7 +323,7 @@ def main():
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         out = []
-        st = capture(ocd, telem, args.seconds, 40, args.hz, out)
+        st = capture(ocd, telem, args.seconds, RECORDS, args.hz, out)
         ctrl = ocd.mdw(telem, CTRL_WORDS)
         if player:
             player.wait()
@@ -328,7 +331,7 @@ def main():
         if args.out:
             fields = ["seq", "t", "hash", "onset", "beat", "bar", "anchor",
                       "pchange", "locked", "silent", "pushed", "mark",
-                      "pattern", "votes", "period", "total", "phase",
+                      "returned", "pattern", "votes", "period", "total", "phase",
                       "onset_age", "settled", "primed", "nov", "d2", "d4", "d8"]
             with open(args.out, "w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=fields)
