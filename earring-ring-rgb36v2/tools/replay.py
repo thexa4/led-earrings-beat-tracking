@@ -40,6 +40,17 @@ MIN_DEV = 8        # PatternMinDev: below this the device is not reading anythin
 CUTS_SHIPPED = (-0.844, 0.0, 0.844)  # PatternCutQ8 = 216
 
 
+def corr(a, b):
+    """Pearson r, or nan for a constant input rather than a division by zero."""
+    if len(a) != len(b) or len(a) < 2:
+        return float("nan")
+    ma, mb = sum(a) / len(a), sum(b) / len(b)
+    cov = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    va = math.sqrt(sum((x - ma) ** 2 for x in a))
+    vb = math.sqrt(sum((y - mb) ** 2 for y in b))
+    return cov / (va * vb) if va > 0 and vb > 0 else float("nan")
+
+
 def load(dirname, side):
     rows = []
     with open(os.path.join(dirname, f"state_{side}.csv")) as fh:
@@ -51,8 +62,18 @@ def load(dirname, side):
     return rows
 
 
-def track(cent, frames, ref_shift=10, dev_shift=10, seed=None):
+def track(cent, frames, ref_shift=10, dev_shift=10, seed=None, smooth=0,
+          dev_raw=False):
     """Reproduce the firmware's reference and spread from the centroid alone.
+
+    `smooth` is an extra low-pass on the deviation itself, in frame shifts, and is 0
+    for the shipped configuration. It is a different thing from ref_shift: the
+    reference sets what the deviation is measured against, while smoothing averages the
+    deviation after it has been formed. The two are not interchangeable, and the
+    spread has to be the spread of whatever is about to be divided - smoothing the gap
+    and dividing by the unsmoothed spread would shrink z toward zero and collapse every
+    colour into the middle bucket, which is an artifact of the emulation and not a
+    result about the feature.
 
     The recursion is the one in pipeline.go, in integers, stepped one analysis frame
     at a time using the device's own frame counter: the gap is taken against the
@@ -82,8 +103,10 @@ def track(cent, frames, ref_shift=10, dev_shift=10, seed=None):
     dev = [0] * len(cent)
     avg = cent[0] if seed is None else seed[0]
     d = 0 if seed is None else seed[1]
+    gs = 0
     rhalf = 1 << (ref_shift - 1)
     dhalf = 1 << (dev_shift - 1)
+    shalf = 1 << (smooth - 1) if smooth else 0
     for i in range(1, len(cent)):
         # Frames elapsed since the previous sample. A poll that failed and reconnected
         # can skip a lot of them; the centroid is then held at its last reading, which
@@ -96,9 +119,20 @@ def track(cent, frames, ref_shift=10, dev_shift=10, seed=None):
         c = cent[i]
         for _ in range(step):
             g = c - avg
-            d += (abs(g) - d + dhalf) >> dev_shift
+            if smooth:
+                gs += (g - gs + shalf) >> smooth
+                # dev_raw: the ruler is the spread of the raw deviation while the
+                # numerator is the smoothed one. Self-consistent on paper is not the
+                # same as safe: with the ruler also smoothed, a centroid that drifts
+                # steadily against a lagging reference keeps all of its drift in the
+                # numerator and loses most of its variation from the ruler, so z runs to
+                # the clamp and both earrings pin to an end colour.
+                src = g if dev_raw else gs
+                d += (abs(src) - d + dhalf) >> dev_shift
+            else:
+                d += (abs(g) - d + dhalf) >> dev_shift
             avg += (g + rhalf) >> ref_shift
-        gap[i] = g
+        gap[i] = gs if smooth else g
         dev[i] = d
     return gap, dev
 
@@ -203,6 +237,21 @@ def main():
                          "converging and the simulation cannot know its seed")
     ap.add_argument("--profile", type=float, default=0.0,
                     help="also print a per-N-seconds profile of the pair")
+    # Two ways a candidate can score well without being any good, gated explicitly
+    # rather than eyeballed. minbucket stops a selector that hides one colour; minchg
+    # stops one that simply stops moving, since two statues agree perfectly. The shipped
+    # selector runs about 0.10 changes/s on this data, so the default admits something
+    # five times slower; the sweep is worth re-running at 0.06 to see what a selector
+    # that still visibly moves costs.
+    ap.add_argument("--minbucket", type=float, default=5.0, metavar="%",
+                    help="smallest colour occupancy allowed in either half")
+    ap.add_argument("--only", default="",
+                    help="comma-separated ref:spread:share:smooth:cuts specs to "
+                         "print as a decision table instead of a ranking")
+    ap.add_argument("--bands", type=float, default=0.0, metavar="SEC",
+                    help="print a per-N-seconds per-band cross-correlation table")
+    ap.add_argument("--minchg", type=float, default=0.02, metavar="PER SEC",
+                    help="lowest change rate allowed for either device")
     args = ap.parse_args()
     holds = [float(x) for x in args.holds.split(",")]
 
@@ -301,6 +350,34 @@ def main():
           f"vs the device's own "
           f"{sum(zLr[k0:])/len(zLr[k0:]):+.2f} / {sum(zRr[k0:])/len(zRr[k0:]):+.2f}")
 
+    # Where the disagreement is in the spectrum. The centroid is a weighted sum of all
+    # eight bands, so a single band whose two earrings read differently - a microphone
+    # with a noisy high end, a band sitting on a room null - drags the chosen colour
+    # with it, and the aggregate r cannot say which. Correlated per block because a
+    # correlation over the whole hour averages passages where the pair agrees with
+    # passages where it does not, and it is the passages that are actionable.
+    #
+    # Read this alongside the profile, not instead of it: a band can correlate badly and
+    # still not matter, if its weight times its variance is small next to the others.
+    if args.bands > 0:
+        print("\nper-band correlation between the two earrings (raw band energy, "
+              "not the centroid):")
+        print("  min  " + " ".join(f"{'b' + str(i):>5s}" for i in range(8)) +
+              "   cent  total L  total R")
+        lo = 0
+        while lo < n - 10:
+            hi = min(n, lo + int(args.bands / dt))
+            if hi - lo < 10:
+                break
+            idx = range(lo, hi)
+            bs = [corr([L[i][6][k] for i in idx], [R[i][6][k] for i in idx])
+                  for k in range(8)]
+            print(f"  {t[lo]:5.0f} " + " ".join(f"{c:+5.2f}" for c in bs) +
+                  f"  {corr(zLr[lo:hi], zRr[lo:hi]):+5.2f} "
+                  f"{sum(sum(L[i][6]) for i in idx)/(hi-lo):7.0f} "
+                  f"{sum(sum(R[i][6]) for i in idx)/(hi-lo):7.0f}")
+            lo = hi
+
     # Where the hour actually goes. One number for the whole capture cannot say
     # whether the pair disagrees because one earring has a permanent opinion the other
     # lacks, or because the disagreement wanders between passages - and those want
@@ -353,14 +430,15 @@ def main():
 
     cache = {}
 
-    def pair_for(ref, dsh):
-        if (ref, dsh) not in cache:
-            cache[(ref, dsh)] = (
+    def pair_for(ref, dsh, sm=0, dev_raw=False):
+        key = (ref, dsh, sm, dev_raw)
+        if key not in cache:
+            cache[key] = (
                 track(cL, fL, ref_shift=ref, dev_shift=dsh,
-                      seed=(L[k0][2], L[k0][3])),
+                      seed=(L[k0][2], L[k0][3]), smooth=sm, dev_raw=dev_raw),
                 track(cR, fR, ref_shift=ref, dev_shift=dsh,
-                      seed=(R[k0][2], R[k0][3])))
-        return cache[(ref, dsh)]
+                      seed=(R[k0][2], R[k0][3]), smooth=sm, dev_raw=dev_raw))
+        return cache[key]
 
     def cuts_for(pooled, mode):
         """Where the three cuts go. Pooled over both earrings on purpose: fitting a
@@ -386,69 +464,175 @@ def main():
     for ref in (7, 8, 9, 10, 11, 12):
         for dsh in (10, 11, 12, 13, 14):
             for share in (1.0, 0.5, 0.0):
-                (gl, dl), (gr, dr) = pair_for(ref, dsh)
-                div = quantile([dl[i] for i in train] + [dr[i] for i in train], 0.5)
-                zl = zscore(gl, dl, share, div)
-                zr = zscore(gr, dr, share, div)
-                no_still = [False] * len(zl)
-                sl = [d < MIN_DEV for d in dl] if share > 0 else no_still
-                sr = [d < MIN_DEV for d in dr] if share > 0 else no_still
-                pooled = [zl[i] for i in train] + [zr[i] for i in train]
-                for mode in ("shipped", "sym", "free"):
-                    cuts = cuts_for(pooled, mode)
-                    bl = bucket(zl, cuts, sl)
-                    br = bucket(zr, cuts, sr)
-                    mt = metrics([bl[i] for i in train], [br[i] for i in train],
-                                 [zl[i] for i in train], [zr[i] for i in train],
-                                 dt, holds)
-                    mv = metrics([bl[i] for i in test], [br[i] for i in test],
-                                 [zl[i] for i in test], [zr[i] for i in test],
-                                 dt, holds)
-                    live = min(min(mt["chg"]), min(mv["chg"])) >= 0.02
-                    even = min(mt["min_bucket"], mv["min_bucket"]) >= 8.0
-                    results.append((min(mt["inst"], mv["inst"]), even, live, ref,
-                                    dsh, share, mode, cuts, mt, mv))
+                for sm in (0, 6, 8, 10, 12):
+                    for draw in (False, True):
+                        (gl, dl), (gr, dr) = pair_for(ref, dsh, sm, draw)
+                        div = quantile([dl[i] for i in train] + [dr[i] for i in train], 0.5)
+                        zl = zscore(gl, dl, share, div)
+                        zr = zscore(gr, dr, share, div)
+                        no_still = [False] * len(zl)
+                        sl = [d < MIN_DEV for d in dl] if share > 0 else no_still
+                        sr = [d < MIN_DEV for d in dr] if share > 0 else no_still
+                        pooled = [zl[i] for i in train] + [zr[i] for i in train]
+                        for mode in ("shipped", "sym", "free"):
+                            cuts = cuts_for(pooled, mode)
+                            bl = bucket(zl, cuts, sl)
+                            br = bucket(zr, cuts, sr)
+                            mt = metrics([bl[i] for i in train], [br[i] for i in train],
+                                         [zl[i] for i in train], [zr[i] for i in train],
+                                         dt, holds)
+                            mv = metrics([bl[i] for i in test], [br[i] for i in test],
+                                         [zl[i] for i in test], [zr[i] for i in test],
+                                         dt, holds)
+                            live = min(min(mt["chg"]), min(mv["chg"])) >= args.minchg
+                            even = min(mt["min_bucket"], mv["min_bucket"]) >= args.minbucket
+                            # Occupancy on the held-out half, per device: a selector can
+                            # average four colours over the hour and still spend the second
+                            # half on two of them.
+                            occl = [100 * [bl[i] for i in test].count(b) / len(test)
+                                    for b in range(4)]
+                            occr = [100 * [br[i] for i in test].count(b) / len(test)
+                                    for b in range(4)]
+                            results.append((min(mt["inst"], mv["inst"]), even, live, ref,
+                                            dsh, share, mode, cuts, mt, mv, sm,
+                                            occl, occr, draw))
 
     def row(tag, res):
-        _, even, live, ref, dsh, share, mode, cuts, mt, mv = res
+        (_, even, live, ref, dsh, share, mode, cuts, mt, mv, sm,
+         occl, occr, draw) = res
         h = holds[0] if holds else 2.0
-        print(f"{tag:30s} ref {ref} ({(1<<ref)/FRAME_RATE:4.0f}s) "
-              f"spread {dsh} ({(1<<dsh)/FRAME_RATE:4.0f}s) share {share:.1f} "
+        smtxt = ("  off" if not sm
+                 else f"{(1<<sm)/FRAME_RATE:4.0f}s" + ("*" if draw else " "))
+        print(f"{tag:26s} ref {ref} ({(1<<ref)/FRAME_RATE:3.0f}s) "
+              f"spread {dsh} ({(1<<dsh)/FRAME_RATE:3.0f}s) sm{smtxt} sh {share:.1f} "
               f"cuts {mode:7s} {cuts[0]:+.2f}/{cuts[1]:+.2f}/{cuts[2]:+.2f} "
               f"| fit {100*mt['inst']:5.1f}%  test {100*mv['inst']:5.1f}%  "
-              f"worst {100*res[0]:5.1f}%  k {mv['kappa']:+.3f}  "
+              f"worst {100*res[0]:5.1f}%  k {mv['kappa']:+.3f} r {mv['r']:+.2f}  "
               f"min {min(mt['min_bucket'], mv['min_bucket']):4.1f}%  "
               f"chg {mv['chg'][0]:.2f}/{mv['chg'][1]:.2f}  "
-              f"{h:g}s {100*mv['holds'][h][0]:5.1f}/{100*mv['holds'][h][1]:5.1f} "
-              f"{'even' if even else 'skew'}{'' if live else ' DEAD'}")
+              f"{h:g}s {100*mv['holds'][h][0]:5.1f}/{100*mv['holds'][h][1]:5.1f}  "
+              f"occ " + " ".join(f"{x:4.1f}" for x in occl) + " | " +
+              " ".join(f"{x:4.1f}" for x in occr) +
+              f" {'even' if even else 'skew'}{'' if live else ' DEAD'}")
 
     ship = [r for r in results
-            if r[3] == 10 and r[4] == 10 and r[5] == 1.0 and r[6] == "shipped"]
+            if r[3] == 10 and r[4] == 10 and r[5] == 1.0 and r[6] == "shipped"
+            and r[10] == 0]
     print("\nreference points:")
     for r in ship:
         row("shipped", r)
 
     ok = [r for r in results if r[1] and r[2]]
-    print(f"\n{len(ok)} of {len(results)} candidates keep every colour above 8% "
-          f"and both devices live; ranked by the worse of the two halves:")
-    for r in sorted(ok, reverse=True)[:18]:
+    if args.only:
+        # A decision table instead of a ranking. The ranking is dominated by clusters of
+        # near-identical candidates - a sweep over five spread values mostly finds the
+        # same answer five times - while the choice that actually has to be made is
+        # between a handful of specific configurations, each with a different cost: one
+        # new constant, one new state variable, or a cut table. Named here, side by
+        # side, on both halves.
+        want = set()
+        for spec in args.only.split(","):
+            f = spec.split(":")
+            g = f + ["0"]
+            want.add((int(g[0]), int(g[1]), float(g[2]), int(g[3]), g[4],
+                      bool(int(g[5]))))
+        print("\ndecision table:")
+        for r in results:
+            # r[13] is the dev_raw flag. Naming it in the spec matters: the same
+            # low-pass scores several points apart depending on whether the ruler
+            # is the spread of the raw deviation or of the smoothed one, and with
+            # the wrong index every spec silently matched nothing.
+            if (r[3], r[4], r[5], r[10], r[6], r[13]) in want:
+                row(f"cand {r[3]}:{r[4]}:{r[5]}:{r[10]}:{r[6]}", r)
+        return
+    print(f"\n{len(ok)} of {len(results)} candidates keep every colour above "
+          f"{args.minbucket:.0f}% and both devices above {args.minchg:.2f} "
+          f"changes/s; ranked by the worse of the two halves:")
+    # Keyed on the score alone: the tuple also carries the two metric dicts, and once
+    # two candidates tie on every scalar ahead of them Python tries to order dicts.
+    for r in sorted(ok, key=lambda r: r[0], reverse=True)[:18]:
         row("", r)
 
-    print("\nexcluded for starving a colour or a dead device (best 6):")
-    for r in sorted([r for r in results if not (r[1] and r[2])],
-                    reverse=True)[:6]:
+    # The excluded list is only interesting if it excludes something other than the
+    # frozen configuration. A long enough low-pass on the deviation makes both
+    # earrings sit in one bucket permanently, which scores 100% agreement and means
+    # nothing at all; those are reported as a count instead of crowding out the rows
+    # that show what else the constraint costs.
+    bad = [r for r in results if not (r[1] and r[2])]
+    frozen = [r for r in bad if min(min(r[9]["chg"]), min(r[8]["chg"])) < 0.005
+              and min(min(r[9]["chg"]), min(r[8]["chg"])) >= 0.0]
+    print(f"\n{len(bad)} excluded for starving a colour (min bucket <"
+          f" {args.minbucket:.0f}%) or for a dead device (below "
+          f"{args.minchg:.2f} changes/s); {len(frozen)} of them freeze "
+          f"altogether. Best of the rest:")
+    rest = sorted([r for r in bad if not (r[1] and r[2])],
+                  key=lambda r: r[0], reverse=True)
+    shown = 0
+    for r in rest:
+        if min(min(r[9]["chg"]), min(r[8]["chg"])) < 0.005:
+            continue
         row("", r)
+        shown += 1
+        if shown == 6:
+            break
+    if not shown:
+        print("  (everything excluded here is frozen or near-frozen)")
 
     # What the winner still leaves on the table, in the units the diagnosis is in.
     if ok:
-        best = max(ok)
-        (gl, dl), (gr, dr) = pair_for(best[3], best[4])
+        best = max(ok, key=lambda r: r[0])
+        (gl, dl), (gr, dr) = pair_for(best[3], best[4], best[10])
         div = quantile([dl[i] for i in train] + [dr[i] for i in train], 0.5)
-        zl = zscore(gl, dl, best[5], div)[test]
-        zr = zscore(gr, dr, best[5], div)[test]
+        zl = [zscore(gl, dl, best[5], div)[i] for i in test]
+        zr = [zscore(gr, dr, best[5], div)[i] for i in test]
+        # Over the whole capture, for the profile below: comparing a candidate's worst
+        # five minutes against the measured worst five minutes only works if both cover
+        # the same hour, and the held-out half is a different hour.
+        zl_f = zscore(gl, dl, best[5], div)
+        zr_f = zscore(gr, dr, best[5], div)
+        bl = bucket(zl_f, best[7], [d < MIN_DEV for d in dl])
+        br = bucket(zr_f, best[7], [d < MIN_DEV for d in dr])
         print(f"\nbest candidate on the held-out half: mean z "
               f"{sum(zl)/len(zl):+.2f} / {sum(zr)/len(zr):+.2f}, "
               f"same sign {100*sum(1 for a, b in zip(zl, zr) if (a > 0) == (b > 0))/len(zl):.0f}%")
+        # The profile is the part that decides whether to believe the number. A +10
+        # point mean that comes from fixing the three bad minutes is a fix; one that
+        # comes from making the good minutes better is a different claim, and only the
+        # first is worth a rebuild.
+        cuts_b = best[7]
+        print("per-minute profile, best candidate (replayed) vs measured:")
+        print("  min  cand%  meas%   r      chg/s")
+        step = 300.0
+        lo = 0
+        while lo < len(tL) - 10:
+            # The trailing window is short and its means are meaningless; stop before it
+            # rather than reporting a percentage of nothing.
+            hi = min(len(tL), lo + int(step / dt))
+            c = sum(1 for i in range(lo, hi) if bl[i] == br[i])
+            m = sum(1 for i in range(lo, hi)
+                    if bucket([zLr[k0 + i]], CUTS_SHIPPED, [L[k0 + i][3] < MIN_DEV])[0]
+                    == bucket([zRr[k0 + i]], CUTS_SHIPPED, [R[k0 + i][3] < MIN_DEV])[0])
+            zzl, zzr = zl_f[lo:hi], zr_f[lo:hi]
+            ml, mr = sum(zzl) / len(zzl), sum(zzr) / len(zzr)
+            cov = sum((a - ml) * (b - mr) for a, b in zip(zzl, zzr))
+            vl = math.sqrt(sum((a - ml) ** 2 for a in zzl))
+            vr = math.sqrt(sum((b - mr) ** 2 for b in zzr))
+            ch = (sum(1 for i in range(lo + 1, hi) if bl[i] != bl[i - 1])
+                  + sum(1 for i in range(lo + 1, hi) if br[i] != br[i - 1]))
+            print(f"  {tL[lo]:5.0f} {100*c/(hi-lo):6.1f} {100*m/(hi-lo):6.1f} "
+                  f"{cov/(vl*vr) if vl > 0 and vr > 0 else float('nan'):+6.2f} "
+                  f"{ch/((hi-lo)*dt)/2:6.2f}")
+            lo = hi
+        # The requirement is not just agreement: a colour nobody ever picks is a bug
+        # and a colour picked half the time is nearly as bad. Reported for the winner
+        # on the held-out half, because that is the only half nobody fitted on.
+        cuts = best[7]
+        sl = [dl[i] < MIN_DEV for i in test]
+        sr = [dr[i] < MIN_DEV for i in test]
+        for nm, z, s in (("L", zl, sl), ("R", zr, sr)):
+            b = bucket(z, cuts, s)
+            print(f"  occupancy {nm}: " + " ".join(
+                f"{100*b.count(i)/len(b):5.1f}" for i in range(4)) + " %")
 
 
 if __name__ == "__main__":
