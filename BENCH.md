@@ -1,0 +1,358 @@
+# Bench debugging: "no sound", dead-looking microphones, and lying captures
+
+Read this **before** concluding that a device, a microphone or the room is at fault.
+It is a map of where to look and which measurements can be trusted, not a record of
+what the bench is doing today. Anything with a number in it here is an illustration
+of a mechanism, not a current fact — re-measure.
+
+## The rule
+
+A reading that says *"this device hears nothing"* is a claim about two things at
+once: the device, and your measurement of it. The measurement is cheaper to falsify
+and, historically in this project, is the one that fails. So:
+
+1. Name the mechanism that could make the measurement lie, out loud or in writing.
+2. Repeat the question with a statistic that mechanism cannot touch.
+3. Only then compare the two devices, and only then the hardware.
+
+Two independent readings that disagree means one of them is wrong — it does not mean
+"average them". And a stored conclusion (in a tool docstring, a commit message, a
+note, or your own earlier sentence) is a hypothesis, not evidence.
+
+## Where the tools are
+
+The repository has two checkouts: the main one at this root, and `debug/` as a second
+worktree on the bench/debug branch. Almost every tool named below lives on the debug
+branch, under `earring-ring-rgb36v2/tools/` inside that worktree — i.e.
+`debug/earring-ring-rgb36v2/tools/`. The main checkout's `tools/` holds only a few
+things (the OpenOCD symbol helper and the host replay harness), and the top-level
+`tools/` only holds the flash script. So when a command below says `tools/thing.py`,
+run it from the debug worktree, and confirm the file exists rather than assuming:
+
+    git -C /home/max/Documents/led-earrings worktree list
+    ls /home/max/Documents/led-earrings/debug/earring-ring-rgb36v2/tools
+
+## Symptom index
+
+| Symptom | Almost always | Start at |
+|---|---|---|
+| One device reads flat / silent | the read, not the mic | §1 |
+| Tone test shows ~0 dB response | incoherent window | §1, `tools/tonelock.py` |
+| Band energy *drops* when music starts | AGC gain coming down — expected | §2 |
+| Device looks fine then goes flat mid-run | SWD link or power, or read tearing | §7 |
+| Two devices agree at zero lag but not overall | alignment, not acoustics | §3 |
+| Both devices read a weird comb/dip spectrum | two players, one room | §4 |
+| A number changed after reflashing | symbol addresses moved | §6 |
+| Tool returns a plausible value for a dead board | stale tunnel / wrong target | §7 |
+
+## 1. The tearing rule (the big one)
+
+The ADC sample ring is 250 samples = 15.6 ms. One `mdw` of it over OpenOCD's telnet
+takes ~7–15 ms, and OpenOCD sustains ~17 kB/s of `mdw` output **regardless of adapter
+clock** (measured at 950 kHz and 4 MHz — do not try to fix this by raising `adapter
+speed`). So the DMA writes roughly 112–240 more samples into the same buffer while it
+is being read, and the returned array is a splice of two non-adjacent time segments
+with an arbitrary jump where the ring wrapped under the read.
+
+Consequences, in order of usefulness:
+
+- **Order-independent statistics survive tearing**: mean, std, MAD, peak-to-peak,
+  histograms, outlier counts. Use these to answer "is there signal at all".
+- **Order-dependent measurements do not survive**: any DFT or coherent tone amplitude,
+  any cross-correlation or lag, any waveform plot, any per-sample transient claim.
+  A Hann-windowed DFT across a discontinuity has no coherent peak left to find, so a
+  *working* microphone can read 0 dB. This is the single most common way to wrongly
+  declare a microphone dead.
+- Freezing is the fix, and the safe way to freeze is the **trigger**: clear `CEN` in
+  TIM22 `CR1` (`0x40011400`), read, set it again, then *verify the ring resumed* by
+  watching `CNDTR` change. See `tools/freeze.py`, which is the reference
+  implementation and explains why.
+- **Never clear the DMA channel's `EN` bit to freeze it.** The ADC loses its request
+  stream, ends up with `ADSTART` cleared, and the ring stays frozen forever — both
+  bench devices needed a hands-on reset the time this was tried. (`freeze.py`
+  documents this; treat it as a hard prohibition.)
+
+Inventory of the bench tools — check it still holds (grep each one for `TIM_CR1`, and
+separately for `CCR`, since a tool can freeze the DMA channel instead), but as of
+writing, of the tools that read the sample ring:
+
+| Freezes the trigger (coherent window) | Does **not** freeze (torn window) |
+|---|---|
+| `freeze.py`, `tonelock.py`, `wavedump.py`, `spikestat.py`, `clip.py`, `haltab.py`, `where.py` | `adcview.py`, `specdump.py`, `paircapture.py`, `micdump.py`, `livelvl.py`, `catch.py`, `capture2.py`, `smpsweep.py`, `pb0probe.py` |
+
+`adcq.py` is deliberately off this table: it *does* clear the DMA `EN` bit, and gets
+away with it only because it then rebuilds the whole capture path (disable `ADEN`,
+reprogram, `ADEN | ADSTART`, re-enable the channel). Copy the `EN` clear without the
+re-initialisation and you get the unrecoverable state described above.
+
+A tool not freezing the ring is only a problem for what you ask it. The telemetry and
+band-field columns from `specdump.py` / `paircapture.py` are computed on the device and
+are unaffected; the raw-window statistics they log alongside (std, p-p) are unaffected
+too, because they are order-independent. It is the waveform-shaped questions that need
+a frozen read.
+
+Note `adcview.py`'s own docstring describes the poll as "a snapshot of whatever 15.6 ms
+happened to be in flight" and calls that fine — it is fine for a *level*, and wrong for
+a coherent DFT. Read tool docstrings for what the author assumed, not just what they
+claimed to measure. `sync_micdump.go` / `sync_micdump_off.go` are the most honest
+write-ups of which probes are trustworthy and why; read them first.
+
+## 2. The normalization rule
+
+Fields that have already been divided by the input level cannot tell you whether
+there was input — that is the thing removed. Know which class each field is in before
+using it (source of truth: `syncdsp/pipeline.go`, `agcUpdate`, and the block layout in
+`tools/specdump.py`):
+
+| Quantity | Relation to level | Usable for "is there sound?" |
+|---|---|---|
+| smoothed / normalised band energies | level divided out by design | no |
+| raw (post-gain) band energies | *inversely* related — rises when the room gets quieter | no |
+| AGC tracked input peak-to-peak (`agcPeak`) | pre-gain, actual ADC counts | yes, for level only |
+| std / p-p of the raw sample window | pre-gain, actual counts | yes (best cheap check) |
+
+Two traps in the AGC itself (constants in `syncdsp/consts.go`):
+
+- The peak-hold leaks by `peak -= peak >> AgcPeakDecay`, so below 512 the shift
+  truncates to zero and the value sticks: the hold **can never fall below 511**.
+  `agcPeak == 511` therefore means "input p-p ≤ 511 counts", i.e. effectively nothing.
+- Because that floor sits *inside* the AGC's target band after gain, a completely dead
+  input parks at a middling shift, **not** at `AgcMaxShift`. So neither "shift is low"
+  nor "shift is not max" proves anything on its own — read the peak, in counts.
+- The tracked peak is **broadband**: it can be dominated by handling/LED/electronic
+  noise and still rise for a tone. It proves *the pin moves*, not *the music is
+  audible*. For audibility, use a coherent measurement on a frozen window.
+
+## 3. Two-device alignment
+
+- Decide explicitly whether each tool's time column is a **shared** wall clock or a
+  per-poller clock. `specdump.py` runs both pollers in one process so its `t` is
+  shared; the telemetry poller stamps rows when it drains the device ring, so its
+  `t` is per-poller and includes that poller's own stalls. Do not assume.
+- **Never align by sequence number or array index with a lag search.** If the best lag
+  lands at (or near) the edge of the search range, the agreement is fabricated.
+- A single global correlation is not one measurement. Split the run into thirds, find
+  the best lag per third, and report the settled part separately from the startup
+  transient. A low global number with high per-third numbers and ~zero lag is a
+  settle/lock problem, not an acoustics problem; the reverse reading is equally wrong.
+- `tools/sync_ceiling.py` does the above (envelope corr, per-band corr, excitation
+  corr, selector upper bounds, per-third drift). Run it before tuning any selector, so
+  you know whether the ceiling or the selector is the limit.
+- Cross-tool detail that bites: the hash column is written **decimal** by `specdump.py`
+  and **hex** by `paircapture.py`.
+
+## 4. One source, one player
+
+Exactly one audio player per run, owned by the caller. Starting one player per device
+thread plays the same file twice from a few centimetres apart: a comb filter, with
+each earring at a different point in it, so the two microphones genuinely hear
+different spectra from the same music. Any paired capture taken with two players is a
+measurement of that interference, not of the pipeline — the story is written out in
+`tools/paircapture.py`'s `capture()` docstring.
+
+Player hygiene: don't launch inside a `( … & )` subshell if something must `pgrep` it
+later, and never pipe it through `head`/`tail` (buffers output, hides prompts).
+**Never change output volume** — the bench sits next to other people's bedrooms.
+
+## 5. Reading the sample buffer correctly
+
+- The sample buffer is `uint16`, two samples per 32-bit word in memory order: low half
+  first, then high half. `mdw` hands back 32-bit words, so both halves must be split
+  out and kept **unsigned**. Taking only the low half "works" (returns plausible
+  numbers) and halves your data; casting to signed invents swings that do not exist.
+- In sync mode the DMA window is one circular `syncWindowSize` block at the base of a
+  larger array — the rest belongs to other code. Confirm the window length rather than
+  assuming the array size.
+- Live DMA registers, as reachable over OpenOCD on this part: `CNDTR` `0x4002000C`,
+  `CCR` `0x40020008`, `CMAR` `0x40020014` (base + `0x08` per channel, `CCR`/`CNDTR`/
+  `CPAR`/`CMAR`). `CMAR` must equal the sample-buffer symbol from the ELF and `CNDTR`
+  must be counting down — that pair is how you prove you are looking at the buffer the
+  DMA is actually writing, and it is the check to make rather than trusting any
+  address. Different STM32L0 variants place DMA at different addresses in the memory
+  map, and a nearby-but-wrong address either fails to read or, worse, reads something
+  that looks fine.
+- `CNDTR` is the authority on the real sample rate (`tools/rate.py`) — worth checking
+  once per rig, because every time-axis in every analysis depends on it.
+- **Peripheral register readback over SWD can be wrong while the part runs.** A GPIO
+  register has been observed reading all-zero on a device that was audibly reacting to
+  sound. So "the register says 0, therefore it is misconfigured" is not a valid
+  inference, and a register-by-register comparison between two devices is not evidence
+  that they are configured alike. Anchor such reads on a value you can independently
+  predict — `CMAR` matching the buffer symbol from the ELF is the usual one — and
+  prefer a behavioural check (does it respond to a tone?) over a register dump.
+
+## 6. Firmware identity before any cross-device comparison
+
+Symbol addresses come from the **local** ELF, so they are only valid for a board that
+runs that build. Before comparing two devices:
+
+- compare their flash (`mdw` over the whole text region and diff, or OpenOCD
+  `flash verifymd5 <addr> <size>` on each);
+- check a layout self-test rather than trusting offsets — see `syncdsp/layout_test.go`
+  for why: a field read at a stale offset returns a plausible-looking number instead
+  of failing;
+- remember a debug build and a release build, or two branches, differ silently.
+
+If the boards match and the ELF matches, addresses are sound and you may go on to
+blame physics.
+
+## 7. Link and power health
+
+| Symptom | Likely cause |
+|---|---|
+| Adapter opens, reports a sane target voltage, then `Fail reading CTRL/STAT` / `Examination failed` / `State: unknown` | supply too low to run the debug interface — check/replace the battery before touching wiring or config |
+| The failing side flips between captures | same: marginal supply, or a shared hub/USB port |
+| Reads succeed sporadically | marginal link; lower `adapter speed` |
+| Tool prints plausible data while the board is doing nothing | stale SSH tunnel pointed at a different target, or a second OpenOCD client |
+
+- Ask the port who owns it before assuming which board you are talking to
+  (`specdump.py` has a note on exactly this). OpenOCD's telnet serves **one** client —
+  a tool that freezes, reads and resumes must own that connection itself.
+- **Never send `shutdown` to a telnet port to test it.** That kills the server.
+- Inside an `ssh '…'` command, a `pkill -f` pattern matches the ssh command line
+  itself: bracket a character (`444[6]`).
+- Run a short sustained-read test before any capture. A few dozen consecutive reads
+  with zero failures catches everything above in under a minute, which is far cheaper
+  than discovering it inside a 3-minute recording.
+- `FLASH_HOST`: the tools default to the flashing host's name. When OpenOCD runs there
+  and you reach it through a local forward, set `FLASH_HOST=localhost`.
+- Commands that flash (`tools/flash.sh`) kill and do not restart the debug servers.
+  Restart them after every flash or the next tool fails confusingly.
+- Use absolute paths in automation: the shell's cwd is not guaranteed to persist
+  between commands, and a stripped `cd` silently runs the wrong tool from the wrong
+  tree.
+
+## 8. Confirming audio delivery without trusting the room
+
+If the sink is networked (AirPlay/raop), you probably cannot verify playback from the
+host: its monitor stream may read exact zeros even while playing. Check the device
+instead:
+
+1. Play a fixture with hard on/off structure (tone bursts are ideal; long tone, long
+   silence).
+2. Measure a **tearing-immune, pre-gain** statistic per poll on each device.
+3. Because networked playback start is not aligned with your capture start, sweep the
+   phase offset of the on/off grid and report the offset that best separates the two
+   classes. No separation at *any* offset is evidence; separation at one guessed phase
+   is not.
+4. For audibility rather than mere level, repeat with a coherent DFT on a **frozen**
+   window (`tools/tonelock.py` does 1–4 plus the frozen/unfrozen comparison, so you can
+   see the size of the artifact instead of arguing about it).
+
+Recreate the usual fixtures if `/tmp` is gone (do not commit them). Note the
+`enable=` expression has to select the interval where the volume is *changed*, so gate
+by setting `volume=0` during the silent half — writing `volume=1` for the loud half
+leaves the file ungated while looking correct, which is easy to miss because the tone is
+still in there:
+
+    ffmpeg -v error -f lavfi -i "sine=frequency=1000:duration=20" -ar 16000 \
+           -af "volume=enable='gte(mod(t,10),5)':volume=0" /tmp/tone5s5s.wav
+
+Check any fixture before blaming a device for not reacting to it — measure the file's
+own envelope, and allow a short fade at each edge from the filter:
+
+    ffmpeg -v error -i /tmp/tone5s5s.wav -ac 1 -ar 8000 -f f32le - 2>/dev/null | \
+      python3 -c 'import sys,numpy as np; x=np.frombuffer(sys.stdin.buffer.read(),dtype=np.float32); b=len(x)//20; print([round(float(np.sqrt((x[i*b:(i+1)*b]**2).mean())),3) for i in range(20)])'
+
+## 9. The bench-free path
+
+When the bench is in question, stop measuring it. The DSP runs on the host over real
+audio, with no SWD, no tearing and no acoustics to argue about:
+
+- `tools/hostbeat/` — replay harness (`readWav`, PCM16 mono).
+- `syncdsp/replay_debug_test.go` — `HOSTBEAT=<file.wav>`.
+- `syncdsp/phase_agreement_test.go` — `HOSTBEAT=…`, skips a warmup.
+- `syncdsp/podcast_hash_test.go` — `PODCAST=…` / `PODEND=…`, feeds the device's own
+  biased sample encoding.
+
+These answer "is the selector deterministic / stable / balanced" and can simulate
+offset, gain, tilt and drift between two instances. They cannot tell you what the two
+microphones actually hear — so they cannot confirm or refute a hardware claim, and they
+are not a substitute for §1–§2 when you make one.
+
+## 10. Where prior knowledge lives
+
+| Question | Look in |
+|---|---|
+| Signal model, roles, success criteria | `earring-ring-rgb36v2/PARTY-SYNC.md` |
+| Why a probe is trustworthy / what it destroys | `sync_micdump.go`, `sync_micdump_off.go` headers |
+| Register-level read traps (write-locks, poll-precedence bugs) | `tools/adcq.py`, `tools/freeze.py`, `tools/adcregs.py` docstrings |
+| Why a past conclusion was reached (and what it rested on) | `tools/paircapture.py`, `tools/specdump.py`, `tools/sync_ceiling.py` docstrings |
+| Actual ADC/DMA/timer configuration in use | `sync.go` (`startSync`/`stopSync`), `datarecv.go`, `bitbang.h` |
+| AGC / band / selector constants | `syncdsp/consts.go`, `syncdsp/pipeline.go` |
+| Pins, electrical limits, supply current, ADC accuracy | `datasheet/DS_stm32l031g6.md` — see §12 for a line-number index |
+| Register addresses, bit definitions, DMA request mapping | **RM0377** (reference manual) — not in the datasheet at all, see §12 |
+| Field notes from previous sessions | `/memories/repo/`, `/memories/session/` |
+
+**Tool docstrings contain measurements from the day they were written.** Several here
+quote specific levels and behaviours of particular bench devices. Those are the
+author's context, not the device's nature — they are the first thing to re-measure, and
+the main way a stale conclusion survives being wrong.
+
+## 11. Recording results
+
+- Label every number with: capture directory, date, build/branch, and whether it passed
+  the health gate. An unlabelled number is a future lie.
+- Separate **measurement** from **inference**, and write the inference separately so it
+  can be wrong on its own.
+- Record the nulls. "Band retarget did not help" is what stops the next person
+  re-trying it.
+- When two measurements conflict, write down the conflict and the experiment that
+  settles it, rather than picking the more convenient one.
+
+## 12. Datasheet index: `datasheet/DS_stm32l031g6.md`
+
+Line numbers into the Markdown conversion of the STM32L031x4/x6 datasheet, for the
+entries this project actually needs. Two caveats before trusting them:
+
+- **These are line numbers into one PDF→Markdown conversion.** If the file is
+  regenerated, re-derive with `grep -n` on the entry name rather than trusting a
+  number here. `grep -n "^#\{1,4\} " datasheet/DS_stm32l031g6.md` dumps the outline.
+- **The datasheet contains no register addresses, no bit definitions, and no DMA
+  request-to-channel mapping.** Section 5 (line 1526) hands the memory map to the
+  reference manual RM0377 and shows the map only as an image. So a question like
+  "what address is DMA1 channel 0's `CMAR`?" is not answerable here — searching this
+  file for it produces noise, which is how wrong-peripheral addresses get into tools.
+  Anything that *is* drawn as a figure (pinout diagrams, block diagram, memory map)
+  is also not searchable text: it is an image under `datasheet/artifacts/`.
+
+| Line | Entry | Why you look here |
+|---|---|---|
+| 420 | §2.1 / Table 2 — features and counts per part | flash/RAM/peripheral count by part number; which package each ordering code is |
+| 485 | §3.1 low-power modes (Sleep 497, LP-run 501, LP-sleep 505, Stop 511/527, Standby 535/541) | what is retained and what is lost in each mode — matters for what survives sleep |
+| 635 | §3.2 interconnect matrix, Table 6 (641, 655) | which source can trigger which destination, and whether it works in each low-power mode. It is *not* a DMA channel map |
+| 703 | §3.4 reset and supply — supervisor 710, regulator 737, boot modes 745 | BOR thresholds; the voltage-scale (VOS) ranges and their frequency limits; `BOOTO`/PA14 boot pin table at 1307 and 1323 |
+| 761 | §3.5 clock management — prescalers 765, safe switching 769, sources 777, CSS 800, MCO 806 | legal AHB/APB division, the required order for a clock switch, MCO as a way to measure the real clock externally |
+| 853 | §3.7 GPIOs | modes, pull-ups, speed classes |
+| 863 | §3.8 EXTI | how many lines, which are configurable, wake sources |
+| 888 | §3.10 DMA | 7 channels, **hardwired** request per channel, circular mode support. No addresses or request table (RM0377) |
+| 900 | §3.11 ADC — oversampling 910 | 12-bit native / 16-bit by hardware oversampling (ratio ≤ 256), channel count, which pins are *fast* channels vs standard, ADC clock independent of CPU, timer-triggered conversion |
+| 987 | §3.15.1 TIM2 / TIM21 / TIM22 — Table 9 at 980, TIM22 at 1001 | which timers have which features (counter width, capture/compare, trigger outputs) — the ADC trigger source is TIM22 |
+| 1159 | §3.18 SW-DP | what the debug port is and what can lock it out |
+| 1169 | §4 pin descriptions — legend Table 14 at 1346 | start of the pin tables |
+| 1364 | Table 15 pin definitions — **PB0 at 1406, PB1 at 1407**, PB2 1408, PA13 1442, PA14 1445 | per-pin: every package's pin number, type (`I/O`, `FT` = 5 V tolerant), alternate functions, ADC channel. PB0 = `ADC_IN8`, PB1 = `ADC_IN9`, PA13/PA14 = SWDIO/SWCLK |
+| 1477 | Table 16 alternate functions — PA13 1494, PA14 1495, PB0 1506, PB1 1507 | the same mapping grouped by peripheral instead of by pin |
+| 1526 | §5 memory mapping | **defers to RM0377**; image only |
+| 1612 | §6.2 absolute maximum ratings, Table 17 at 1616 | the damage limits — the only table to consult before concluding a part was over-stressed |
+| 1678 | §6.3.1 general operating conditions, Table 20 at 1680 (cont. 1716) | the conditions every other electrical number assumes |
+| 1727 | §6.3.2 reset and power-control characteristics | POR/PDR/BOR and the supply ramp requirements — the place to look when a board browns out under LED load |
+| 1785 | §6.3.3 internal reference voltage | VREFINT accuracy and its calibration value — the yardstick for any ADC reading you convert to volts |
+| 1822 | §6.3.4 supply current; **on-chip peripheral current at 2192** | run/sleep current by mode and frequency, plus per-peripheral µA — the budget for a battery-life estimate |
+| 2254 | §6.3.5 wakeup times | how long each mode takes to wake, and what dominates it |
+| 2447 | §6.3.7 internal clock sources — **HSI16 Table 41 at 2453**, LSI 2510, **MSI Table 43 at 2525** (cont. 2540), PLL 2580 | HSI16 accuracy over temperature/voltage: this is the timebase the sample rate is derived from, so its tolerance *is* your sample-rate error. MSI table gives the range frequencies |
+| 2592 | §6.3.9 memory — Table 45 (2596), flash/EEPROM 2602 | RAM/register address space sizes; flash and EEPROM endurance and retention — the constraint behind repeated state-page writes |
+| 2648 | §6.3.10 EMC — **"designing hardened software to avoid noise problems" 2670**, EMI 2696 | ST's own guidance on software patterns that create or suffer from noise — directly relevant to bit-banging LEDs next to a microphone |
+| 2743 | §6.3.12 I/O current injection | how much current a pin may inject, and the consequence for other pins |
+| 2770 | §6.3.13 I/O port characteristics — Table 53 at 2776, **output drive current 2856**, output levels 2867, Table 55 at 2903 | per-pin and per-port current limits for the LED drive; input leakage that loads the mic bias network |
+| 2950 | §6.3.14 NRST | reset pin behaviour, filter, and what a floating/reset line does |
+| 3000 | **§6.3.15 12-bit ADC characteristics** | the ADC section proper — read it before arguing about sample time or drive strength |
+| 3008 | Table 57 ADC characteristics (cont. 3035) | max `fADC` **per voltage range** (the ceiling depends on which range you run), sampling rate, external trigger limits, sampling-switch resistance and internal S/H capacitance — the two numbers the `R_AIN` equation needs |
+| 3060 | Equation 1 — max source resistance `R_AIN` | whether the mic's RC network can settle in the sample time you configured. This is the calculation to do before blaming DSP for a weak reading |
+| 3072 | Table 58 `R_AIN` max at `fADC` = 16 MHz | the allowed source impedance, worked out for you at one clock setting |
+| 3074 | Table 59 ADC accuracy | effective resolution is ~11 bits typical, and ~12 bits at 256× oversampling — **not** the 12 or 16 bits the raw code width implies. SNR/THD too. Note 2 at **3090**: negative injection on any standard analog pin degrades conversions on *other* channels |
+| 3148 | §6.3.16 temperature sensor | using the internal channel |
+| 3177 | §6.3.17 comparators | comparator offsets/hysteresis and their reference options |
+| 3218 | §6.3.18 timer characteristics, Table 64 at 3226 (cont. 3240) | min pulse widths, max input/output frequencies — the floor on how fast a trigger can run |
+| 3249 | §6.3.19 comms — I²C 3251, SPI 3289 | interface timing if a peripheral is added |
+| 3751 | §7.5 UFQFPN28 package (marking at 3824) | the footprint this part uses; land pattern and dimensions |
+| 4045 | §7.8 thermal characteristics | junction temperature limits from package θ_JA — the check behind a "works cold, drifts warm" report |

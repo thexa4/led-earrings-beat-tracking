@@ -6,6 +6,7 @@ datasheet/
 
 # Build artifacts
 earring-ring-rgb36v2/firmware.elf
+scream/tools/screamcheck/screamcheck
 
 # Python bytecode from tools/
 __pycache__/
