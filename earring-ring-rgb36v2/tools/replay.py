@@ -464,7 +464,11 @@ def main():
     for ref in (7, 8, 9, 10, 11, 12):
         for dsh in (10, 11, 12, 13, 14):
             for share in (1.0, 0.5, 0.0):
-                for sm in (0, 6, 8, 10, 12):
+                # 11 used to be missing from this list. It sits between 10, which
+                # ships, and 12, which freezes one device into two buckets - and the
+                # gap between a winner and a corpse is exactly where a grid must not
+                # get coarse.
+                for sm in (0, 6, 8, 9, 10, 11, 12):
                     for draw in (False, True):
                         (gl, dl), (gr, dr) = pair_for(ref, dsh, sm, draw)
                         div = quantile([dl[i] for i in train] + [dr[i] for i in train], 0.5)

@@ -598,17 +598,29 @@ const (
 	//	off           46.8%    +0.290        19.4%        0.09 / 0.13
 	//	1 s           47.2%    +0.295        19.5%        0.08 / 0.10
 	//	4 s           49.1%    +0.321        19.5%        0.07 / 0.07
+	//	8 s           46.1%    +0.285        19.8%        0.06 / 0.06
 	//	16 s          54.4%    +0.381        14.7%        0.04 / 0.04
+	//	33 s          59.6%    +0.338         3.1%        0.03 / 0.02
 	//	66 s          45.2%    +0.001         0.0%        0.01 / 0.01
 	//
-	// 16 s is a real optimum rather than the top of a monotone curve: at 66 s the
-	// buckets empty, one device spends 68% of the scored half-hour in a single colour
-	// and kappa falls to +0.001, which is worse than doing nothing. The cost is
-	// honest and is the reason this is a decision rather than a free win - a colour
-	// now changes about half as often, every 20 s instead of every 10, and per-minute
-	// scoring shows the gain coming mostly from passages where the pair already
-	// agreed rather than from fixing the three five-minute stretches where the two
-	// microphones genuinely hear different music (correlation near zero there, and no
+	// 33 s agrees more often than 16 s and is still the wrong answer, which is the
+	// most useful thing in this table. Its occupancy is 6 / 50 / 36 / 8 percent: the
+	// two middle colours eat the ring and the outer two nearly vanish, so the extra
+	// agreement is partly bought by predicting the popular answer, and chance-corrected
+	// agreement (kappa) goes down, not up. A ring where a user can never see two of the
+	// four colours is broken regardless of what the metric says, and 33 s also sits one
+	// octave from the 66 s collapse with no margin on either side. 16 s is chosen for
+	// the best kappa plus a usable distribution, not the highest agreement.
+	//
+	// Read the small differences in this table as noise. 8 s scoring below both 4 s and
+	// leaving it off is not a property of 8 s; the curve is bumpy at the few-point level
+	// on an hour of material, so only the 46-49 band versus 54-60 step is a real effect.
+	//
+	// The cost of 16 s is honest and is the reason this is a decision rather than a free
+	// win - a colour now changes about half as often, every 20 s instead of every 10, and
+	// per-minute scoring shows the gain coming mostly from passages where the pair
+	// already agreed rather than from fixing the three five-minute stretches where the
+	// two microphones genuinely hear different music (correlation near zero there, and no
 	// filter recovers a signal that is not shared).
 	//
 	// The ruler matters as much as the low-pass, and the two have to be reported
