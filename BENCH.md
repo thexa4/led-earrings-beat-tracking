@@ -43,6 +43,7 @@ run it from the debug worktree, and confirm the file exists rather than assuming
 | Two devices agree at zero lag but not overall | alignment, not acoustics | §3 |
 | Both devices read a weird comb/dip spectrum | two players, one room | §4 |
 | A number changed after reflashing | symbol addresses moved | §6 |
+| A long capture looks healthy and its numbers look believable | offsets read from a stale ELF, which cannot be detected by name lookup | §6 |
 | Tool returns a plausible value for a dead board | stale tunnel / wrong target | §7 |
 
 ## 1. The tearing rule (the big one)
@@ -192,6 +193,21 @@ runs that build. Before comparing two devices:
   for why: a field read at a stale offset returns a plausible-looking number instead
   of failing;
 - remember a debug build and a release build, or two branches, differ silently.
+- **A name-based offset lookup cannot detect a stale ELF.** Asking DWARF for a member
+  by name returns an offset, not a verdict, so when the struct changed the lookup
+  succeeds and is simply wrong. Adding one field to `Pipeline` shifted every member
+  after it by four bytes; the capture ran clean, filled at the expected rate, and
+  reported 63% agreement computed from the wrong columns. Look for something with an
+  opinion, and the cheapest ones are invariants the values cannot satisfy:
+  `frame` counts analysis frames and must advance, and `centDev` is an average of an
+  absolute value and cannot be negative. `paircapture.py` now asserts both inside its
+  first 25 polls.
+- To prove the ELF is the image on the bench, rebuild both from one tree and diff the
+  ELF's own image against the hex that was flashed:
+
+  ```sh
+  objcopy -O ihex firmware.elf /tmp/check.hex   # compare byte for byte to firmware.hex
+  ```
 
 If the boards match and the ELF matches, addresses are sound and you may go on to
 blame physics.
@@ -200,7 +216,7 @@ blame physics.
 
 | Symptom | Likely cause |
 |---|---|
-| Adapter opens, reports a sane target voltage, then `Fail reading CTRL/STAT` / `Examination failed` / `State: unknown` | supply too low to run the debug interface — check/replace the battery before touching wiring or config |
+| Adapter opens, reports a sane target voltage, then `Fail reading CTRL/STAT` / `Examination failed` / `State: unknown` | marginal supply — try fresh cells. Do **not** read the reported voltage as the battery; see the note below |
 | The failing side flips between captures | same: marginal supply, or a shared hub/USB port |
 | Reads succeed sporadically | marginal link; lower `adapter speed` |
 | Tool prints plausible data while the board is doing nothing | stale SSH tunnel pointed at a different target, or a second OpenOCD client |
@@ -218,16 +234,20 @@ blame physics.
   and you reach it through a local forward, set `FLASH_HOST=localhost`.
 - Commands that flash (`tools/flash.sh`) kill and do not restart the debug servers.
   Restart them after every flash or the next tool fails confusingly.
-- **Watch the target voltage across sessions, not just within one.** Both earrings
-  reported 3.273 V and 3.253 V for a long time; measured later they read 3.254 V and
-  3.248 V, and the right one had become unwritable — `Fail reading CTRL/STAT` on
-  every attempt, plain or under reset. The absolute number still looks fine, which is
-  why it reads like a tooling fault. Compare against the historical value before
-  believing the adapters.
+- **The `Target voltage` line is not the battery.** Both earrings became hard to
+  write — the right one refused everything, `Fail reading CTRL/STAT` at any speed,
+  plain or under reset. Both readings sat at 3.254 V and 3.248 V, which looks fine,
+  and that is exactly why the fault reads as a tooling problem. Replacing both cells
+  fixed the writes outright and moved those numbers by about **1 mV**. On this bench
+  VCC is disconnected, so what OpenOCD reports is its own sense of the target rail
+  and has no connection to the cell at all.
+  The general form is worth more than the specifics here: before treating a reading
+  as evidence, check that it can move when the quantity it names is changed. This
+  one could not, and a confident diagnosis was built on it anyway.
 - `tools/flash.sh` falls back to `reset_config srst_only connect_assert_srst` at
-  100 kHz and says so on stderr when it has to. That fallback is a symptom, not a
-  fix: a healthy earring never needs it, and a cell low enough to need it may still
-  fail the write. Treat the message as "replace this cell".
+  100 kHz and says so on stderr when it has to. Useful — the left earring was only
+  writable that way for a while — but it is a workaround for a marginal target, not
+  a diagnosis of one, and after fresh cells neither earring needed it.
 - Use absolute paths in automation: the shell's cwd is not guaranteed to persist
   between commands, and a stripped `cd` silently runs the wrong tool from the wrong
   tree.
