@@ -205,6 +205,27 @@ const (
 	// step 5 for why hashing the raw frame instead does not work at all.
 	SmoothShift = 5
 
+	// SpikeCodesQuiet, SpikeCodesOutlier and SpikeRelativeMul are the impulse
+	// filter's thresholds (see feed), in raw ADC codes.
+	//
+	// SpikeCodesQuiet is how still a neighbourhood must be (its second-smallest
+	// adjacent difference) for SpikeCodesOutlier alone to decide. Bench devices
+	// with the LEDs dark have a 1.5-4.5 code floor carrying isolated 40-90 code
+	// impulses on ~3% of samples; at 4 codes the filter starts editing waveforms.
+	//
+	// SpikeRelativeMul is the test while music plays and the LEDs animate, where
+	// the neighbourhood is never still: a sample counts as an impulse when it sits
+	// more than SpikeCodesOutlier + SpikeRelativeMul*d2 from its five-sample median.
+	// A point on a smooth waveform sits about one slope step from its median at any
+	// amplitude: dv/d2 measured 0-1.0 up to 1 kHz, 1.41 at 6 kHz. The LED coupling,
+	// up to +16381 codes one sample wide against 200-270 counts of room tone,
+	// measured dv/d2 = 76 at the median and 510-12252 at p90. 2 starts editing the
+	// 3-6 kHz band; 64 is back to the quiet-only rule, which leaves the coupling
+	// untouched exactly while it is loudest.
+	SpikeCodesQuiet   = 16
+	SpikeCodesOutlier = 25
+	SpikeRelativeMul  = 8
+
 	// RingSize is the beat-indexed hash ring. It is indexed by *beat counter*
 	// (not frame counter, not wall clock) because two earrings have no
 	// shared clock: see PARTY-SYNC.md §D3. Must be a power of two.

@@ -158,6 +158,12 @@ type Pipeline struct {
 	centAvgQ8 int32
 	centDevQ8 int32
 
+	// Impulse filter (see feed): the five-sample window, oldest first, the
+	// priming count, and how many samples the filter replaced (for host tests).
+	spX1, spX2, spX3, spX4, spX5 int32
+	spFill                       int32
+	spCount                      int32
+
 	frame  int32
 	events Events
 }
@@ -194,8 +200,103 @@ func (p *Pipeline) Process(raw []uint16) Events {
 // step with the music, and the subtraction modulates the bass band by an amount
 // comparable to a quiet passage's whole signal. The bank's 30 Hz blocker
 // removes the bias in ~30 ms and never looks at the music's envelope.
+//
+// Before the bank, isolated impulses are replaced by the median of the
+// five-sample window centred on them. The LEDs couple into the microphone as
+// single samples of up to +16381 codes, uncorrelated between the two earrings
+// and following the animation's brightness, so left in they are most of every
+// band's energy: the DC blocker turns each into a bass transient, the AGC's
+// peak-to-peak level is the impulse, and the spectrum the pattern is read from
+// is the LEDs'. Measured on bench noise, 3% of 90-code impulses read 2.68 bits
+// of modulation depth raw, 1.99 after a three-point median and 1.06 after this
+// five-point one, against 1.02 with no impulses (a pair of impulses on adjacent
+// samples is common, and five is the smallest window that outvotes it).
+//
+// The window is centred - two samples of latency - because against a causal one
+// a smooth waveform's deviation is its slope, and the turn of a bass note fires
+// the test (8% of a clean recording replaced); centred, it is the curvature
+// (0.1%). The neighbourhood's own motion is d2, the second-smallest of the four
+// adjacent differences: unlike the neighbours' distance from the median it is
+// not zero for a waveform near Nyquist, and it ignores up to two outliers.
+// When the filter does not fire the sample passes unchanged: a median on every
+// sample would erase a 6 kHz tone, a third of what the hash can see.
 func (p *Pipeline) feed(v uint16) {
-	p.filters.run(int32(v) - 1<<15)
+	x := int32(v)
+	if p.spFill < 3 {
+		p.spX1, p.spX2, p.spX3, p.spX4, p.spX5 = x, x, x, x, x
+		p.spFill++
+		if p.spFill < 3 {
+			return
+		}
+	}
+	p.spX1, p.spX2, p.spX3, p.spX4, p.spX5 = p.spX2, p.spX3, p.spX4, p.spX5, x
+	c := median5(p.spX1, p.spX2, p.spX3, p.spX4, p.spX5)
+
+	d1, d2, d3, d4 := abs32(p.spX1-p.spX2), abs32(p.spX2-p.spX3),
+		abs32(p.spX3-p.spX4), abs32(p.spX4-p.spX5)
+	if d1 > d2 {
+		d1, d2 = d2, d1
+	}
+	if d3 > d4 {
+		d3, d4 = d4, d3
+	}
+	if d1 > d3 {
+		d3 = d1
+	}
+	if d2 > d4 {
+		d2 = d4
+	}
+	if d2 > d3 {
+		d2 = d3
+	}
+	dv := abs32(p.spX3 - c)
+	if (d2 <= SpikeCodesQuiet && dv > SpikeCodesOutlier) ||
+		dv > SpikeCodesOutlier+SpikeRelativeMul*d2 {
+		p.spCount++
+	} else {
+		c = p.spX3
+	}
+	p.filters.run(c - 1<<15)
+}
+
+// median5 is the middle of five by a nine-comparator network (checked over
+// every ordering in TestMedian5).
+func median5(a, b, c, d, e int32) int32 {
+	if a > b {
+		a, b = b, a
+	}
+	if d > e {
+		d, e = e, d
+	}
+	if c > e {
+		c, e = e, c
+	}
+	if c > d {
+		c, d = d, c
+	}
+	if a > d {
+		a, d = d, a
+	}
+	if a > c {
+		c = a
+	}
+	if b > e {
+		b = e
+	}
+	if b > d {
+		b = d
+	}
+	if b > c {
+		c = b
+	}
+	return c
+}
+
+func abs32(v int32) int32 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // agcUpdate runs once per frame: fold this frame's input peak into a slow
