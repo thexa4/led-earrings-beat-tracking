@@ -294,10 +294,24 @@ const (
 
 	// PatternCentroidShift, PatternScaleShift and PatternGapShift are the time
 	// constants of the centroid, of its reference and spread, and of the low-pass
-	// on its deviation, as shifts at 62.5 frames/s (10 = 16 s, 11 = 33 s).
+	// on its deviation, as shifts at 62.5 frames/s (9 = 8 s, 11 = 33 s, 12 = 66 s).
+	//
+	// Chosen together with the cuts by replaying every combination over a real
+	// two-earring bench capture (20 min of the podcast, both earrings' spectra
+	// and beat events, tools/paircapture.py --state; see bench_replay_test.go),
+	// fitted on the first 10 minutes from a cold start and scored on the second:
+	//
+	//	                          kappa fit/held-out   least-used pattern   stuck
+	//	11/12/9, cuts +-256        0.69 / 0.80          20% / 17%            23% / 13%
+	//	11/11/11, cuts +-150       0.49 / 0.84          11% / 16%            36% / 10%
+	//	9/11/9, wider weights      0.46 / 0.52          14% / 22%            37% / 33%
+	//
+	// The simulated two-device sweep (podcast_pattern_test.go) preferred faster
+	// constants and wider weights; the real capture reverses both, so the
+	// simulation is a parity check here, not a tuner.
 	PatternCentroidShift = 11
-	PatternScaleShift    = 11
-	PatternGapShift      = 11
+	PatternScaleShift    = 12
+	PatternGapShift      = 9
 
 	// PatternCentroidScale is headroom on the stored centroid so that the EMAs'
 	// per-frame corrections stay in their linear range. It cancels in
@@ -306,9 +320,9 @@ const (
 
 	// PatternCut1..3 are the bucket boundaries, in Q8 units of the centroid's
 	// mean absolute deviation from its reference.
-	PatternCut1 = -150
+	PatternCut1 = -256
 	PatternCut2 = 0
-	PatternCut3 = 150
+	PatternCut3 = 256
 
 	// PatternMaxHoldFrames is the longest the pattern goes without being re-read
 	// (4 s), the backstop for a device whose musical triggers never fire. Above a
