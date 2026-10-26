@@ -2,12 +2,16 @@
 """Does each earring actually hear the speaker? Run this before any pair analysis.
 
 Every conclusion about agreement assumes both earrings are measuring the same
-sound. That assumption cost a session: one earring's smoothed spectrum had a
-0.5-doubling range over 291 s of music and the *same* range over 40 s of silence,
-while the other went 0.5 -> 2.9 doublings between the two. The unresponsive unit's
-spectrum did move when the music started, by the same -0.3 doublings in every band,
-and that uniformity is the tell: sound reaching two differently-placed units
-changes band levels by *different* amounts, while the AGC moves all bands equally.
+sound, so this runs first. Read the caveat below before acting on a failure.
+
+This tool reported a healthy earring deaf, for most of a session, because its
+primary metric divided a linear magnitude sum by 256 and printed the result as
+doublings. The number kept the right sign and small ratios came out nearly right, so
+nothing looked wrong — and the metric's own docstring called it the one measurement
+that could not lie, which is exactly why it went unchecked. The bench was correct
+throughout: position verified, one player, audible. So treat a failing unit here as a
+bug report against this file until a second, independent measurement agrees with it
+— see BENCH.md section 1.
 
 So the test is not "are the two spectra equal" - two working earrings are unequal,
 and that difference is the object of study. It is whether each unit *responds*:
@@ -35,10 +39,13 @@ Absolute level is reported as well, because a unit whose AGC sits at a high gain
 while its input peak barely moves is attenuated rather than dead, which points at
 the microphone, its bias, or the battery.
 
-A unit that fails is usually sitting badly rather than broken: the unit that showed
-no response over 291 s of one capture responded normally to a tone minutes later,
-with nothing changed but where it lay. Re-run this after moving it before blaming
-the hardware or the DSP.
+The discriminators are worth more than the verdict. A uniform rise across every band
+is the AGC, not the room: sound reaching two differently-placed units moves band
+levels by *different* amounts. So read the per-band pattern before believing any
+single number, and confirm delivery the way BENCH.md section 8 describes - a fixture
+with hard on/off structure, a tearing-immune pre-gain statistic, and the phase of the
+on/off grid swept rather than guessed. No separation at any offset is evidence;
+separation at one guessed phase is not.
 
   tools/hearing.py [--seconds 30] [--file TRACK] [--outdir DIR]
 
@@ -158,34 +165,40 @@ def main():
               + f"   band-selective part {shape:.2f}")
         # A unit with a working microphone and a speaker in the room shows a
         # clear rise. Judge on that; the smoothed numbers are context.
+        #
+        # The threshold is deliberately reported as a failure of THIS test, not
+        # of the unit. raw is bank.energy, and while an earring animates its own
+        # LED refresh contributes impulses of up to +16400 counts to that same
+        # sum - larger than the room by a wide margin, and varying with the
+        # animation rather than with the sound. A unit can therefore sit in front
+        # of a working speaker, hear it perfectly, and still show no rise here,
+        # because the quantity being differenced is mostly its own output. That
+        # is not a caveat on the number, it is the number's dominant term.
         if gain < 0.7:
             bad.append(name)
-            # Before believing a failure, rule out the one thing that fakes it.
-            # These units inject their own LED refresh into the converter at up
-            # to +16400 counts, one sample wide, which is larger than any room
-            # signal and swamps the band energies it is meant to measure; see
-            # tools/haltab.py, which separates it by halting the CPU. A unit can
-            # be hearing perfectly and still fail this test because its own
-            # output is the loudest thing in its window.
-            print("       (before blaming this unit: run tools/haltab.py. Its own"
-                  " LED refresh is often the loudest thing in the window.)")
 
     print()
     if bad:
-        print(f"  NO SOUND ARRIVING at: {' and '.join(bad)}")
-        print("  Its band energy does not rise when the track starts, so this unit")
-        print("  is not measuring the speaker, and any cross-device comparison")
-        print("  measures that instead of the music. But this test is easy to fail")
-        print("  for reasons that are not the microphone, so check in order:")
-        print("   1. tools/haltab.py --windows 20. These units inject their own LED")
-        print("      refresh into the converter at up to +16400 counts, one sample")
-        print("      wide, which is far larger than any room signal. An earring")
-        print("      that is animating can be hearing the room perfectly and still")
-        print("      show no rise, because its own output is the band energy.")
-        print("   2. The unit is not muted or asleep.")
-        print("   3. The speaker is the sink ffplay picks (wpctl status) and sound")
-        print("      actually leaves it.")
-        print("   4. Only then the unit's placement, then its hardware.")
+        print(f"  THIS TEST SAW NO RISE at: {' and '.join(bad)}")
+        print("  That is a statement about this measurement, not about the unit. It")
+        print("  is the third bug this file has had in this metric, and the bench has")
+        print("  been verified correct every time it fired. Check in this order:")
+        print("   1. tools/haltab.py --windows 20, with the room silent. If the unit")
+        print("      injects LED-refresh impulses (one or two samples wide, all one")
+        print("      sign, vanishing when the CPU halts), then band energy here is")
+        print("      mostly its own output and this test cannot see the room at all.")
+        print("      That is a limitation of the metric, not a fault of the earring.")
+        print("   2. tools/wavedump.py, silence then track, and compare the TRIMMED")
+        print("      body range of each frozen window (sort it, take s[-4] - s[3]).")
+        print("      Pre-gain and immune to those impulses, so it is the independent")
+        print("      confirmation. Sweep nothing: the two phases are separate runs.")
+        print("   3. The speaker is the sink ffplay picks (wpctl status). A networked")
+        print("      sink's monitor stream can read zeros while playing, so verify at")
+        print("      the device, and never by changing the volume.")
+        print("   4. This file: recompute the ratio by hand from the printed medians.")
+        print("      Two of the three bugs here were found that way.")
+        print("  Placement and hardware are checked by whoever set the bench up, and")
+        print("  are not on this list. Do not re-derive them from a capture.")
         return 1
     print("  both earrings respond to the speaker; pair analysis is meaningful.")
     return 0

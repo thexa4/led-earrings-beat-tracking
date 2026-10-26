@@ -356,6 +356,10 @@ def main():
     ap.add_argument("--elf", default=os.path.join(here, "..", "firmware.elf"))
     ap.add_argument("--stop", action="store_true",
                     help="tear down the remote servers and exit")
+    ap.add_argument("--serve", action="store_true",
+                    help="bring the two OpenOCD servers and the local tunnels up "
+                         "and hold them, without capturing: what the standalone "
+                         "tools (hearing.py, haltab.py, sync_ceiling.py) need")
     ap.add_argument("--no-play", action="store_true",
                     help="capture only (e.g. room is already playing music)")
     ap.add_argument("--state", action="store_true",
@@ -365,7 +369,40 @@ def main():
 
     if args.stop:
         stop_servers(args.host)
+        subprocess.run(["pkill", "-f", "ssh .*-L (4445|4446):"])
         print("servers stopped, adapters rebound")
+        return
+
+    if args.serve:
+        # Deliberately the same tunnel pair a capture uses, so a later
+        # paircapture finds the ports held by its own mechanism rather than by a
+        # stray forward with no keepalive.
+        tunnel = open_tunnel(args.host, PORTS.values())
+        time.sleep(1)
+        try:
+            spawn_servers(args.host)
+        except Exception:
+            tunnel.terminate()
+            raise
+        print(f"bench is up: FLASH_HOST=localhost, ports "
+              f"{', '.join(str(p) for _, p in PORTS.values())}. "
+              f"Ctrl-C or --stop when done.")
+        try:
+            while True:
+                time.sleep(5)
+                if tunnel.poll() is not None:
+                    # The forward died, not the servers. Rebuilding the bench would
+                    # kill two perfectly healthy servers to fix a local socket, and
+                    # stop_servers cannot tell that case from a dead target.
+                    print("tunnel died; re-run or press Ctrl-C")
+                    break
+                if not all(server_alive(t) for _, t in PORTS.values()):
+                    print("a server died; rebuilding the bench", flush=True)
+                    spawn_servers(args.host)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            tunnel.terminate()
         return
 
     os.makedirs(args.outdir, exist_ok=True)
