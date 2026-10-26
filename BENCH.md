@@ -159,18 +159,24 @@ Two traps in the AGC itself (constants in `syncdsp/consts.go`):
 - **The analysis frame rate is not timer-paced.** `main.go` increments `frame` once
   every twelve iterations of a free-running loop whose duration is the LED
   bit-bang, so the analysis rate is software timing and follows what the LEDs are
-  doing — not a crystal. Measured over ~2100 s of one capture the two earrings
-  advanced 130992 and 129701 frames, 1.0% apart, so the skew between them grows as
-  a clean monotone ramp reaching **21 s**, and the older capture shows the same at
-  32.9 s/hour. Two units showing different colours run at different analysis rates,
-  which feeds back into the skew.
-  Consequence for every analysis: pairing rows by **host poll index is wrong** and
-  gets worse through the run. Each capture carries the device's own `frame` counter,
-  which counts audio frames and is the only honest time axis; align on that. Do not
-  fit a slope *and* intercept per-window by cross-correlation — with a 16 s
-  low-pass in the signal the fit is ill-conditioned (measured residual 33 s) and can
-  absorb real disagreement. Take the slope from the counters, and fit at most one
-  constant for the boot offset.
+  doing. Measured over ~2100 s of one capture the two earrings advanced 130992 and
+  129701 frames, 1.0% apart, so the skew between them grows as a clean monotone ramp
+  reaching **21 s**, and an older capture shows 32.9 s/hour.
+- **The sample clock is not the cause — frames are dropped, not samples.**
+  `tools/rate.py` measures the real ADC rate straight from the DMA transfer counter:
+  both units run at ~16 kSPS with no dropped triggers. So the ring wraps at the
+  configured rate and the analysis simply fails to service every wrap, because the
+  loop is busy bit-banging. Which wraps get skipped depends on the animation, so two
+  units showing different colours fall behind at different rates and the divergence
+  is content-dependent rather than a fixed oscillator offset. Fix the frame pacing
+  (timer-driven, one wrap in, one frame out) before expecting any pair to agree.
+  Consequence for every analysis meanwhile: pairing rows by **host poll index is
+  wrong** and gets worse through the run. Each capture carries the device's own
+  `frame` counter, which counts audio frames and is the only honest time axis; align
+  on that. Do not fit a slope *and* intercept per-window by cross-correlation — with
+  a 16 s low-pass in the signal the fit is ill-conditioned (measured residual 33 s)
+  and can absorb real disagreement. Take the slope from the counters, and fit at most
+  one constant for the boot offset.
 - Decide explicitly whether each tool's time column is a **shared** wall clock or a
   per-poller clock. `specdump.py` runs both pollers in one process so its `t` is
   shared; the telemetry poller stamps rows when it drains the device ring, so its
@@ -251,8 +257,18 @@ runs that build. Before comparing two devices:
   ELF's own image against the hex that was flashed:
 
   ```sh
-  objcopy -O ihex firmware.elf /tmp/check.hex   # compare byte for byte to firmware.hex
+  python3 tools/imgcmp.py firmware.hex firmware.elf   # converts, then byte-for-byte
   ```
+
+  Do this with the tool rather than a throwaway script. Intel HEX fields are
+  `: LL AAAA TT data CC`, and reading the type from the wrong pair of characters makes
+  the high half of the address the record type, so most records get quietly treated as
+  something to skip: a 30468-byte firmware parses to a couple of hundred bytes, those
+  get compared, no disagreement is found, and the check reports success. That happened
+  twice here, in a session whose conclusions depended on it. `imgcmp.py` counts declared
+  data bytes independently of the map it builds, so a parser losing records fails loudly
+  instead of passing on a stub, and it is checked against a single flipped data nibble —
+  a guard that cannot fail is worth nothing.
 
 If the boards match and the ELF matches, addresses are sound and you may go on to
 blame physics.
