@@ -83,9 +83,12 @@ func quiet(w []uint16, _ *int32) {
 // rides on a -15600 count error that the DC blocker has to absorb. Modelled
 // because the two effects interact: the blocker's output is where the stalls
 // happen.
+// benchDC is the microphone's idle ADC code, measured on both bench devices.
+const benchDC = 17120
+
 func benchOffset(w []uint16, _ *int32) {
 	for i, v := range w {
-		y := 17120 + (int32(v)-32768)/64
+		y := benchDC + (int32(v)-32768)/64
 		if y < 0 {
 			y = 0
 		}
@@ -382,95 +385,5 @@ func TestGolden(t *testing.T) {
 	}
 	if GoldenAnchors != anchorBits {
 		t.Errorf("anchor events drifted from golden: got %016x want %016x", anchorBits, GoldenAnchors)
-	}
-}
-
-// TestPatternIndexStable checks the pattern choice: in range, one pattern per
-// band, gain invariant, and unmoved by perturbations small enough that no band
-// actually changes rank.
-func TestPatternIndexStable(t *testing.T) {
-	if NumPatterns != NBands-1 {
-		t.Errorf("NumPatterns = %d, want NBands-1 = %d: the mapping is one pattern per band", NumPatterns, NBands-1)
-	}
-	vectors := [][NBands]int32{
-		{4100, 4600, 4900, 4700, 4300, 3900, 3600, 5200}, // mids
-		{5400, 4300, 4100, 4000, 3900, 3800, 3700, 5100}, // air
-		{3900, 4000, 4200, 4400, 4700, 5000, 5300, 5100}, // low mids
-		{4500, 4500, 4500, 4500, 4500, 4500, 4500, 4500}, // flat
-		{4000, 4100, 4200, 5200, 4200, 4100, 4000, 5000}, // band 3 lead
-		{4000, 5000, 4200, 4100, 4100, 4100, 4100, 5000}, // band 1 lead
-	}
-	seen := map[int32]bool{}
-	for _, v := range vectors {
-		dev := spectralDevs(&v)
-		pat := PatternIndex(&dev)
-		if pat < 0 || pat >= NumPatterns {
-			t.Fatalf("pattern %d out of range for %v", pat, v)
-		}
-		seen[pat] = true
-		// Gain invariance: the same spectrum at another level.
-		for _, off := range []int32{-2000, -300, 900, 6000} {
-			var w [NBands]int32
-			copy(w[:], v[:])
-			for b := range w {
-				w[b] += off
-			}
-			d2 := spectralDevs(&w)
-			if p2 := PatternIndex(&d2); p2 != pat {
-				t.Errorf("offset %d changed pattern %d -> %d", off, pat, p2)
-			}
-		}
-		// A perturbation must not move the choice unless it changes the ranking.
-		for b := 0; b < NBands; b++ {
-			for _, eps := range []int32{-64, 64} {
-				var w [NBands]int32
-				copy(w[:], v[:])
-				w[b] += eps
-				d2 := spectralDevs(&w)
-				if p2 := PatternIndex(&d2); p2 != pat && dev[pat]-dev[p2] > 64 {
-					t.Errorf("band %d by %d Q8 log2 flipped pattern %d (gap %.2f dB) -> %d",
-						b, eps, pat, float64(dev[pat]-dev[p2])/256, p2)
-				}
-			}
-		}
-	}
-	if len(seen) < 4 {
-		t.Errorf("PatternIndex uses only %d of %d patterns", len(seen), NumPatterns)
-	}
-}
-
-// TestPatternHysteresis checks that a band cannot take the pattern from the one
-// on screen without beating it by PatternMargin, and does take it once it does.
-//
-// It feeds usePattern deviation arrays directly, which is the domain the
-// function works in: the deviations themselves are what spectralDevs produces
-// and what the margin compares.
-func TestPatternHysteresis(t *testing.T) {
-	// Band 2 dominant, band 3 a clear second but inside the margin.
-	var p Pipeline
-	p.Init()
-	dev := [NBands]int32{-20000, -10000, 0, -4000, -12000, -18000, -22000, -24000}
-	if got := p.usePattern(&dev); got != 2 {
-		t.Fatalf("first choice should be band 2, got %d", got)
-	}
-	// Band 3 comes within a whisker: not enough to take over.
-	dev[3] = dev[2] - 1000
-	if got := p.usePattern(&dev); got != 2 {
-		t.Errorf("a 1000-unit challenge took the pattern (%d), needs %d", 1000, PatternMargin)
-	}
-	// Just short of the margin: still holds.
-	dev[3] = dev[2] + PatternMargin - 1
-	if got := p.usePattern(&dev); got != 2 {
-		t.Errorf("a challenge of %d took the pattern, needs %d", PatternMargin-1, PatternMargin)
-	}
-	// Over the margin: takes over.
-	dev[3] = dev[2] + PatternMargin
-	if got := p.usePattern(&dev); got != 3 {
-		t.Errorf("a clear win of %d did not take the pattern, got %d", PatternMargin, got)
-	}
-	// Now band 2 has to clear the same margin to win it back, and does not.
-	dev[2] = dev[3] - 1
-	if got := p.usePattern(&dev); got != 3 {
-		t.Errorf("incumbent should defend, got %d", got)
 	}
 }

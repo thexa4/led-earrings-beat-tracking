@@ -144,12 +144,19 @@ type Pipeline struct {
 	// rate the ring does - including the virtual beats used before lock - which
 	// keeps the two devices' counters aligned without a shared clock.
 	beatsSincePattern int32
+	// framesSincePattern counts frames since the last pattern change, for the
+	// backstop at PatternMaxHoldFrames.
+	framesSincePattern int32
 
-	// patternBand is the band currently on screen, which usePattern defends
-	// against close challenges (hysteresis). Invalid until the first decision:
-	// a zero value would otherwise look like a legitimate band 0.
-	patternBand      int32
-	patternBandValid bool
+	// Pattern feature: the spectral centroid (the PatternWeights sum over the
+	// smoothed spectrum), its own slow reference and mean absolute deviation, and
+	// the low-passed deviation the pattern is read from. All four carry eight
+	// fraction bits: an integer EMA at these shifts has a deadband of hundreds of
+	// counts and stops wherever it happened to stop moving. See endFrame step 5b'.
+	centQ8    int32
+	centGapQ8 int32
+	centAvgQ8 int32
+	centDevQ8 int32
 
 	frame  int32
 	events Events
@@ -420,6 +427,44 @@ func (p *Pipeline) endFrame() Events {
 	}
 	dev := spectralDevs(&p.smooth)
 
+	// 5b'. The pattern feature: the spectral centroid and its own slow reference.
+	//
+	// A gain adds the same amount to every band and PatternWeights sums to zero, so
+	// gain multiplies out here. A steady spectral tilt (microphone response, hand,
+	// room) enters as a constant, which subtracting the device's own reference
+	// removes. What is left is divided by the device's own spread in PatternIndex,
+	// so a device whose centroid swings twice as far is not read as twice as
+	// opinionated. Computed from the floored smooth, so silence gives a constant
+	// centroid, the spread decays and PatternMinDev holds the middle pattern.
+	c := int32(0)
+	for i, v := range p.smooth {
+		c += v * PatternWeights[i]
+	}
+	c *= PatternCentroidScale
+	if p.frame < PatternSeedFrames {
+		// Seeded on every frame until the front end has settled. Seeded once on
+		// frame 0 instead, the bias step the DC blocker absorbs at power-on lands
+		// in the centroid's slow statistics and takes minutes to leave them.
+		p.centQ8, p.centAvgQ8, p.centDevQ8, p.centGapQ8 = c<<8, c<<8, 0, 0
+	} else {
+		p.centQ8 += ((c << 8) - p.centQ8 + (1 << (PatternCentroidShift - 1))) >> PatternCentroidShift
+		gap := (p.centQ8 >> 8) - (p.centAvgQ8 >> 8)
+		// Only the quantity being judged is low-passed. The ruler stays the spread
+		// of the raw deviation: the spread of the smoothed one loses what the
+		// low-pass removed while a steady drift keeps all of its deviation, and the
+		// ratio then runs to the clamp and pins both devices to an end pattern.
+		p.centGapQ8 += ((gap << 8) - p.centGapQ8 + (1 << (PatternGapShift - 1))) >> PatternGapShift
+		abs := gap
+		if abs < 0 {
+			abs = -abs
+		}
+		p.centDevQ8 += ((abs << 8) - p.centDevQ8 + (1 << (PatternScaleShift - 1))) >> PatternScaleShift
+		// The reference is an accumulation of the gap, not an average moving
+		// toward it: written as ((gap<<8) - centAvgQ8) >> shift it chases the gap
+		// instead of the centroid, runs to zero, and pins the ratio.
+		p.centAvgQ8 += ((gap << 8) + (1 << (PatternScaleShift - 1))) >> PatternScaleShift
+	}
+
 	// 5c. The hash is recomputed every frame from a snapshot of the smoothed
 	// spectrum, but its *temporal* field reads p.prevSmooth, which only
 	// advances at ring pushes (below). Between beats that makes the per-frame
@@ -465,6 +510,17 @@ func (p *Pipeline) endFrame() Events {
 		Pattern: p.lastPattern,
 	}
 
+	// 6b. Pattern backstop: every musical trigger in decide() needs beat lock and
+	// a settled hash, and a device without them would otherwise hold its warmup
+	// pattern while its partner changes. Safe on an arbitrary frame because the
+	// choice is a function of the music alone. It must run after the events are
+	// rebuilt above, or the change is made without PatternChanged being reported
+	// and the display never follows it.
+	if p.frame >= PatternWarmupFrames && p.framesSincePattern >= PatternMaxHoldFrames {
+		p.repattern()
+	}
+	p.framesSincePattern++
+
 	// 7. Beat-indexed ring pushes, gated on the hash having settled (see 5d):
 	// the ring only ever holds settled section descriptors, so both novelty
 	// and the periodicity match compare settled values against each other.
@@ -473,7 +529,7 @@ func (p *Pipeline) endFrame() Events {
 	push := (beatBoundary || (!p.beat.Locked && onset)) && !p.silent &&
 		p.stableFrames >= AnchorSettleFrames
 	if push && p.frame >= WarmupFrames {
-		p.decide(h, barBoundary, &dev)
+		p.decide(h, barBoundary)
 		p.events.HashAge = 0
 	}
 
@@ -504,7 +560,7 @@ func (p *Pipeline) endFrame() Events {
 		p.events.Anchor = true
 		// Snap the pattern to the new section immediately, ignoring the
 		// pattern refractory: this is the moment all the earrings are meant
-		// to realign on. setPattern resets the refractory itself when the
+		// to realign on. repattern resets the refractory itself when the
 		// snap actually changes something; deliberately NOT zeroing it here
 		// unconditionally - measured, that starved the bar-driven re-read
 		// whenever anchors fired closer together than a bar (the tuned hash
@@ -515,7 +571,7 @@ func (p *Pipeline) endFrame() Events {
 		// ring relative to the others' and "4 bars ago" would mean
 		// different music on each earring. The tracker's PLL already keeps
 		// the count on the music.
-		p.setPattern(p.usePattern(&dev))
+		p.repattern()
 	}
 
 	// 9. Tempo: every TempoStep frames, correlate the recent envelope against
@@ -796,7 +852,7 @@ func (p *Pipeline) onsetDetectBass(bass int32) bool {
 // specific while onsets and settling are not.
 //
 //go:noinline
-func (p *Pipeline) decide(h uint32, barBeat bool, dev *[NBands]int32) {
+func (p *Pipeline) decide(h uint32, barBeat bool) {
 	b := &p.beat
 
 	// The temporal reference advances now, at a musical position: the next
@@ -851,8 +907,8 @@ func (p *Pipeline) decide(h uint32, barBeat bool, dev *[NBands]int32) {
 	}
 
 	// The pattern follows the music (see PatternIndex); the events below only
-	// decide *when* it is re-read. Re-reading is a no-op when the dominant band
-	// has not clearly changed, so nothing is gained by reading it rarely - and
+	// decide *when* it is re-read. Re-reading is a no-op when the centroid has
+	// not crossed a cut, so nothing is gained by reading it rarely - and
 	// something is lost, because a device that fell out of step is only corrected
 	// at the next re-read.
 	//
@@ -861,24 +917,27 @@ func (p *Pipeline) decide(h uint32, barBeat bool, dev *[NBands]int32) {
 	// frames apart at most, and both read essentially the same spectrum there, so
 	// this trigger cannot by itself cause a divergence the way an event that only
 	// one device sees would.
-	pat := p.usePattern(dev)
-
 	if (returned || barBeat) && p.beatsSincePattern >= PatternRefractoryBeats {
-		p.setPattern(pat)
+		p.repattern()
 	}
 	p.beatsSincePattern++
 }
 
-// setPattern switches the animation pattern and reports it in the events. The
-// refractory is counted in beats whether or not the pattern actually changed, so
-// a device that keeps re-reading the same pattern still waits the full window
-// before the next look.
-func (p *Pipeline) setPattern(pat int32) {
+// repattern re-reads the pattern and, if it moved, switches to it and reports it
+// in the events. The refractory is counted in beats whether or not the pattern
+// actually changed, so a device that keeps re-reading the same pattern still
+// waits the full window before the next look. Not inlined: it has three callers
+// and the flash has no room for three copies.
+//
+//go:noinline
+func (p *Pipeline) repattern() {
+	pat := p.pattern()
 	if pat == p.lastPattern {
 		return
 	}
 	p.lastPattern = pat
 	p.beatsSincePattern = 0
+	p.framesSincePattern = 0
 	p.events.PatternChanged = true
 	p.events.Pattern = pat
 }
@@ -1070,64 +1129,57 @@ func hotBits(cur *[NBands]int32) uint32 {
 	return w
 }
 
-// PatternIndex picks the band that stands furthest above the fitted spectral
-// line and maps it to an animation pattern: the pattern says "this moment is
-// bass" or "this moment is hats", which is readable and self-healing.
+// PatternIndex maps the centroid's deviation from its reference, in units of its
+// own spread, onto one of NumPatterns ordered buckets.
 //
-// The choice of driver is deliberate, and measured. Two properties matter more
-// than musical sophistication:
+// It has no memory, and that is a requirement. The previous selector (argmax over
+// bands, with an incumbent that a challenger had to beat by a margin) measured on
+// the bench at 57% visibly matching and 36% visibly stuck on different patterns:
+// the incumbent is per-device state with no channel between the earrings, and the
+// margin exceeded the lead the true winner usually held, so once divided neither
+// device ever yielded. The same spectra scored 81% with the memory removed. The
+// change rate is limited by the commit gates instead (bar boundaries,
+// PatternRefractoryBeats), which do not make the choice depend on what this device
+// happened to be showing.
 //
-//   - Self-healing. Because the pattern is a pure function of the audio and not
-//     a counter of past events, a device that misses one event is back in step
-//     at the next one instead of being one pattern behind for the rest of the
-//     track.
-//   - Insensitivity. Mappings tried before - which lag matched, a hash bit,
-//     popcount modulo NumPatterns - each turned a single disagreeing bit into a
-//     different pattern, or wrapped a neighbouring value into a distant one.
-//
-// The bottom band is excluded, matching shapeBits: it is a catch-all lowpass
-// that wins nearly always and would freeze the animation. That leaves bands
-// 0..NBands-2, which map one pattern per band - hence NumPatterns == NBands-1,
-// asserted in TestPatternIndexStable. Pattern 0 is "air" (above 4 kHz, hats and
-// cymbals) and pattern NumPatterns-1 is the low mids.
-//
-// Plain argmax is still too sharp on its own: two adjacent bands are often
-// within a fraction of a dB of each other, so devices whose deviations differ by
-// a hair picked different bands from an identical hash. usePattern adds the
-// hysteresis that fixes this; this function is the stateless part.
-//
-//go:noinline
-func PatternIndex(dev *[NBands]int32) int32 {
-	best := int32(0)
-	for b := int32(1); b < NBands-1; b++ {
-		if dev[b] > dev[best] {
-			best = b
-		}
+// The buckets are ordered, so two devices that disagree land on neighbouring
+// patterns. A spread under PatternMinDev reports the middle pattern: that is a
+// still device in a quiet room, and also the division guard (on -panic=trap a
+// division by zero resets the device).
+func PatternIndex(gap, spread int32) int32 {
+	if spread < PatternMinDev {
+		return NumPatterns / 2
 	}
-	return best
+	// Clamped before the scaling: the bound is a multiple of the divisor, so the
+	// product cannot wrap and the quotient stays within +-512.
+	if lim := spread * 2; gap > lim {
+		gap = lim
+	} else if gap < -lim {
+		gap = -lim
+	}
+	z := gap * 256 / spread
+	pat := int32(0)
+	if z > PatternCut1 {
+		pat++
+	}
+	if z > PatternCut2 {
+		pat++
+	}
+	if z > PatternCut3 {
+		pat++
+	}
+	return pat
 }
 
-// usePattern is PatternIndex with hysteresis: a band takes over only when it
-// clearly beats the one on screen, otherwise the animation keeps showing the
-// band that was already closest.
-//
-// Without this, adjacent bands that are a fraction of a dB apart flip the
-// pattern between devices that otherwise agree on everything - measured as two
-// earrings with byte-identical hashes sitting on different patterns. The margin
-// is in the same Q8<<8 deviation units as spectralDevs.
-//
-//go:noinline
-func (p *Pipeline) usePattern(dev *[NBands]int32) int32 {
-	challenger := PatternIndex(dev)
-	if p.patternBandValid && challenger != p.patternBand &&
-		dev[challenger] < dev[p.patternBand]+PatternMargin {
-		// Not a clear win: keep the incumbent, but still report it as the
-		// current pattern so devices converge.
-		return p.patternBand
+// pattern reads the pattern from the low-passed centroid deviation, reporting the
+// middle pattern until the reference and spread are worth reading: with a spread
+// near zero every cut sits on the reference, and two earrings that booted a few
+// seconds apart would start on different patterns.
+func (p *Pipeline) pattern() int32 {
+	if p.frame < PatternWarmupFrames {
+		return NumPatterns / 2
 	}
-	p.patternBand = challenger
-	p.patternBandValid = true
-	return p.patternBand
+	return PatternIndex(p.centGapQ8>>8, p.centDevQ8>>8)
 }
 
 // hashFrame computes the 24-bit perceptual hash of a smoothed band spectrum

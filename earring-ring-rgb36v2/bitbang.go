@@ -6,7 +6,6 @@ package main
 import "C"
 import (
 	"device/stm32"
-	"machine"
 	"unsafe"
 )
 
@@ -20,47 +19,27 @@ func configureLEDs() {
 	// the output entirely.
 
 	// Set A1-A12 as open drain (and importantly, skip SWDIO/SWCLK)
-	stm32.GPIOA.OTYPER.Set(0b1000_0111_1111_1111)
+	stm32.GPIOA.OTYPER.Set(ledPins)
 
-	A1.High()
-	A2.High()
-	A3.High()
-	A4.High()
-	A5.High()
-	A6.High()
-	A7.High()
-	A8.High()
-	A9.High()
-	A10.High()
-	A11.High()
-	A12.High()
-	A1.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	A2.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	A3.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	A4.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	A5.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	A6.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	A7.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	A8.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	A9.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	A10.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	A11.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	A12.Configure(machine.PinConfig{Mode: machine.PinOutput})
+	// All high (off), then all to output at high speed: what A1..A12.High()
+	// and Configure(PinOutput) do pin by pin, as one write per register.
+	stm32.RCC.IOPENR.SetBits(stm32.RCC_IOPENR_IOPAEN)
+	stm32.GPIOA.BSRR.Set(ledPins)
+	stm32.GPIOA.MODER.Set(stm32.GPIOA.MODER.Get()&^ledPins2 | ledPins2&0x5555_5555)
+	stm32.GPIOA.OSPEEDR.Set(stm32.GPIOA.OSPEEDR.Get()&^ledPins2 | ledPins2&0xAAAA_AAAA)
 }
 
+// ledPins are A1-A12 (PA15, PA10..PA0) as a one-bit-per-pin mask; ledPins2 is
+// the same pins in the two-bit-per-pin layout of MODER, OSPEEDR and PUPDR.
+const (
+	ledPins  = 0b1000_0111_1111_1111
+	ledPins2 = 0b11<<30 | 1<<22 - 1
+)
+
 func disableLEDs() {
-	A1.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
-	A2.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
-	A3.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
-	A4.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
-	A5.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
-	A6.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
-	A7.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
-	A8.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
-	A9.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
-	A10.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
-	A11.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
-	A12.Configure(machine.PinConfig{Mode: machine.PinInputAnalog})
+	// Configure(PinInputAnalog) on A1..A12: analog mode, no pull.
+	stm32.GPIOA.MODER.SetBits(ledPins2)
+	stm32.GPIOA.PUPDR.ClearBits(ledPins2)
 
 	// Restore OTYPER to default value.
 	stm32.GPIOA.OTYPER.Set(0)

@@ -144,6 +144,11 @@ const (
 	IdentityMask = HashMask & ^uint32((1<<NBands)-1)
 )
 
+// PatternWeights collapse the smoothed spectrum into the one number the pattern
+// is read from (band 0 is >4 kHz, band 7 is <250 Hz). They must sum to zero, so
+// that a gain - the AGC's, or one microphone being quieter - cancels out.
+var PatternWeights = [NBands]int32{-7, 0, 0, 0, 7, 0, 0, 0}
+
 // Tunables. See PARTY-SYNC.md §11.
 const (
 	// TemporalDeadband is the deadband on the temporal delta bits, in Q8 log2
@@ -277,20 +282,52 @@ const (
 	PatternRefractoryBeats = 4
 
 	// NumPatterns is the number of animation patterns the sync mode cycles
-	// through: one per band that can win the pattern choice, so the mapping from
-	// spectrum to pattern is one-to-one and needs no modulo. Pattern selection
-	// is a pure function of the spectrum (see PatternIndex): it must never use
-	// the RNG, or devices diverge.
+	// through. Pattern selection is a pure function of the spectrum (see
+	// PatternIndex): it must never use the RNG, and must never depend on the
+	// pattern this device happens to be showing, or devices diverge.
 	//
-	// Must equal NBands-1; TestPatternIndexStable asserts it.
-	NumPatterns = 7
+	// Four, set by what two microphones can tell apart rather than by how many
+	// animations exist: every extra cut is another place for two independent
+	// measurements to land on opposite sides. PatternIndex has one cut per
+	// boundary, so changing this means changing the cuts too.
+	NumPatterns = 4
 
-	// PatternMargin is the hysteresis a band needs in order to take the pattern
-	// from the band on screen, in the deviation units of spectralDevs (Q8<<8, so
-	// 256<<8 is 6 dB). Adjacent bands in real music are often a fraction of a dB
-	// apart, and without a margin two devices agreeing to within a bit still end
-	// up on different patterns.
-	PatternMargin = 32 << 8
+	// PatternCentroidShift, PatternScaleShift and PatternGapShift are the time
+	// constants of the centroid, of its reference and spread, and of the low-pass
+	// on its deviation, as shifts at 62.5 frames/s (10 = 16 s, 11 = 33 s).
+	PatternCentroidShift = 11
+	PatternScaleShift    = 11
+	PatternGapShift      = 11
+
+	// PatternCentroidScale is headroom on the stored centroid so that the EMAs'
+	// per-frame corrections stay in their linear range. It cancels in
+	// PatternIndex, which divides by a spread in the same units.
+	PatternCentroidScale = 4
+
+	// PatternCut1..3 are the bucket boundaries, in Q8 units of the centroid's
+	// mean absolute deviation from its reference.
+	PatternCut1 = -150
+	PatternCut2 = 0
+	PatternCut3 = 150
+
+	// PatternMaxHoldFrames is the longest the pattern goes without being re-read
+	// (4 s), the backstop for a device whose musical triggers never fire. Above a
+	// bar at any tracked tempo, so the musical triggers still decide when a change
+	// lands whenever they work.
+	PatternMaxHoldFrames = 250
+
+	// PatternMinDev is the spread below which the pattern is not read: nothing
+	// is moving, stay in the middle. Also PatternIndex's division guard.
+	PatternMinDev = 8
+
+	// PatternWarmupFrames holds the middle pattern for 8 s, until the centroid's
+	// reference and spread mean something.
+	PatternWarmupFrames = 500
+
+	// PatternSeedFrames is how long the centroid's statistics are held at the
+	// current value before they start averaging: 2 s, by which time the DC
+	// blocker and the 0.5 s spectrum smoothing have absorbed the power-on step.
+	PatternSeedFrames = 128
 
 	// WarmupFrames suppresses decisions while the DC tracker and per-band
 	// AGC converge (~1 s).
