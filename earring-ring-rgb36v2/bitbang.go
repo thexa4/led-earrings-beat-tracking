@@ -49,25 +49,22 @@ func disableLEDs() {
 // and if it's inlined all of the long assembly for generating bitplanes is also
 // inlined there.
 //
-// Size could be further reduced by not inlining the individual
-// bitbang_update_bitplane_x functions but this seems fine for now.
-//
 //go:noinline
 func setLEDs(index int, led0, led1, led2 uint32) {
-	// Every third bitplane uses the same timing group; the C helpers only
-	// touch memory (the timing-critical part is bitbang_show_leds), so the
-	// group is picked from the index instead of repeating twelve inlined
-	// copies here.
+	// Each group of three indices has its common line on one of the four pin
+	// slots (see bitbang_update_bitplane), which gets 0; the other three LEDs
+	// go to the remaining slots in board order. tools/bitbang_equiv.py checks
+	// this against the per-group builders it replaced.
+	a, b, c, d := led0, led2, led1, uint32(0)
 	switch index / 3 {
 	case 0:
-		C.bitbang_update_bitplane_1(led0, led1, led2, &bitplanes[index][0])
+		b, c, d = 0, led2, led1
 	case 1:
-		C.bitbang_update_bitplane_2(led0, led1, led2, &bitplanes[index][0])
-	case 2:
-		C.bitbang_update_bitplane_3(led0, led1, led2, &bitplanes[index][0])
+		c, d = 0, led1
 	case 3:
-		C.bitbang_update_bitplane_4(led0, led1, led2, &bitplanes[index][0])
+		a, d = 0, led0
 	}
+	C.bitbang_update_bitplane(a, b, c, d, &bitplanes[index][0])
 }
 
 var bitplanes [12][3]uint32
