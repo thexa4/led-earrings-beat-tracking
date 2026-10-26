@@ -65,6 +65,9 @@ func flashLock() {
 //
 // No defer for the lock in these two: on -panic=trap nothing between the unlock
 // and the lock can return early, and a defer frame costs more than the call.
+// Not inlined: saveState and storePattern both call both.
+//
+//go:noinline
 func flashErasePages(addr uintptr, count int) {
 	flashUnlock()
 	stm32.FLASH.PECR.Set(stm32.Flash_PECR_ERASE | stm32.Flash_PECR_PROG)
@@ -79,6 +82,8 @@ func flashErasePages(addr uintptr, count int) {
 
 // flashWrite writes len(p) bytes (len must be a multiple of 4, addr must be
 // word aligned) to flash that has just been erased.
+//
+//go:noinline
 func flashWrite(addr uintptr, p []byte) {
 	flashUnlock()
 

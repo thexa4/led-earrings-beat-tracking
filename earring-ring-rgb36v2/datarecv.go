@@ -149,19 +149,40 @@ func adcDataNextWindow(delayBefore uint32) {
 	dcOffset = dsp.CopyWithOffset(rawSamples, adcDataNormalized[:], dcOffset)
 }
 
+// setIndicatorPin is Pin.Configure for the A1-A12 pins (all on GPIOA, whose
+// clock configureLEDs enables at boot) in the three modes the receiver uses for
+// its indicator lights. Configure inlines the clock enable and its whole mode
+// switch at every call, and the receiver has a dozen of them.
+//
+//go:noinline
+func setIndicatorPin(p machine.Pin, mode machine.PinMode) {
+	pos := uint8(p) % 16 * 2
+	if mode == machine.PinOutput {
+		stm32.GPIOA.MODER.ReplaceBits(1, 3, pos)
+		stm32.GPIOA.OSPEEDR.ReplaceBits(2, 3, pos) // high speed
+		return
+	}
+	pull := uint32(0) // machine.PinInput: floating
+	if mode == machine.PinInputPulldown {
+		pull = 2
+	}
+	stm32.GPIOA.MODER.ReplaceBits(0, 3, pos)
+	stm32.GPIOA.PUPDR.ReplaceBits(pull, 3, pos)
+}
+
 //go:noinline
 func dataRecv(slot int) {
 	// Reset LEDs.
 	disableLEDs()
 
 	// Enable indicator lights.
-	A10.Configure(machine.PinConfig{Mode: machine.PinInputPulldown})
-	A12.Configure(machine.PinConfig{Mode: machine.PinInputPulldown})
+	setIndicatorPin(A10, machine.PinInputPulldown)
+	setIndicatorPin(A12, machine.PinInputPulldown)
 
-	A9.Configure(machine.PinConfig{Mode: machine.PinOutput})
+	setIndicatorPin(A9, machine.PinOutput)
 	A9.High()
 	if slot >= 1 {
-		A8.Configure(machine.PinConfig{Mode: machine.PinOutput})
+		setIndicatorPin(A8, machine.PinOutput)
 		A8.High()
 	}
 
@@ -207,9 +228,9 @@ func dataRecv(slot int) {
 	// Restore the LEDs.
 	// Note: have to set the below two as input due to a bug (pull mode is not
 	// reset when switching from input to output mode).
-	A10.Configure(machine.PinConfig{Mode: machine.PinInput})
-	A11.Configure(machine.PinConfig{Mode: machine.PinInput})
-	A12.Configure(machine.PinConfig{Mode: machine.PinInput})
+	setIndicatorPin(A10, machine.PinInput)
+	setIndicatorPin(A11, machine.PinInput)
+	setIndicatorPin(A12, machine.PinInput)
 	configureLEDs()
 }
 
@@ -239,9 +260,9 @@ func receiveData(slot int) {
 		if result < 0 {
 			if result == datatrans.ErrCodeReceived {
 				// Fully received! Show green LEDs (while saving the binary):
-				A10.Configure(machine.PinConfig{Mode: machine.PinInput})
-				A11.Configure(machine.PinConfig{Mode: machine.PinInputPulldown})
-				A12.Configure(machine.PinConfig{Mode: machine.PinInput})
+				setIndicatorPin(A10, machine.PinInput)
+				setIndicatorPin(A11, machine.PinInputPulldown)
+				setIndicatorPin(A12, machine.PinInput)
 
 				// Save the binary.
 				binary := decoder.Bytes()
@@ -259,11 +280,11 @@ func receiveData(slot int) {
 
 		if decoder.ReceivingValid() && !whiteWasOn {
 			// Blink the LEDs white-ish.
-			A11.Configure(machine.PinConfig{Mode: machine.PinInputPulldown})
+			setIndicatorPin(A11, machine.PinInputPulldown)
 			whiteWasOn = true
 		} else {
 			// Go back to the previous (purple) color.
-			A11.Configure(machine.PinConfig{Mode: machine.PinInput})
+			setIndicatorPin(A11, machine.PinInput)
 			whiteWasOn = false
 		}
 
