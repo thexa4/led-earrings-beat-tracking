@@ -30,6 +30,9 @@ func flashRead(dst []byte, addr uintptr) {
 	copy(dst, src)
 }
 
+// Not inlined: flashErasePages and flashWrite both start with it.
+//
+//go:noinline
 func flashUnlock() {
 	// Make sure the flash peripheral clock is enabled.
 	stm32.RCC.AHBENR.SetBits(stm32.RCC_AHBENR_MIFEN)
@@ -59,10 +62,11 @@ func flashLock() {
 }
 
 // flashErasePages erases count pages of flash starting at page address addr.
+//
+// No defer for the lock in these two: on -panic=trap nothing between the unlock
+// and the lock can return early, and a defer frame costs more than the call.
 func flashErasePages(addr uintptr, count int) {
 	flashUnlock()
-	defer flashLock()
-
 	stm32.FLASH.PECR.Set(stm32.Flash_PECR_ERASE | stm32.Flash_PECR_PROG)
 
 	for i := 0; i < count; i++ {
@@ -70,13 +74,13 @@ func flashErasePages(addr uintptr, count int) {
 		// To erase, write any value to somewhere in that page.
 		(*volatile.Register32)(unsafe.Pointer(a)).Set(uint32(a))
 	}
+	flashLock()
 }
 
 // flashWrite writes len(p) bytes (len must be a multiple of 4, addr must be
 // word aligned) to flash that has just been erased.
 func flashWrite(addr uintptr, p []byte) {
 	flashUnlock()
-	defer flashLock()
 
 	// Callers pass a multiple of 4 bytes at a word-aligned address, so the
 	// buffer can be reinterpreted as words directly (the byte-wise packing
@@ -85,4 +89,5 @@ func flashWrite(addr uintptr, p []byte) {
 	for i := 0; i < len(words); i++ {
 		(*volatile.Register32)(unsafe.Pointer(addr + uintptr(i)*4)).Set(words[i])
 	}
+	flashLock()
 }
