@@ -323,19 +323,21 @@ const (
 	// and beat events, tools/paircapture.py --state; TestBenchMulti,
 	// TestBenchFine and TestBenchCandidates in bench_replay_test.go), each from
 	// a cold start. The captures are 0-19, 25-40 and 40-60 min of the podcast,
-	// plus a second recording of 40-60 and of 0-19 made on another day:
+	// plus a second recording of each made on another day:
 	//
-	//	                            kappa 0-19 / 25-40 / 40-60 / 40-60b / 0-19b   mean  worst
-	//	b2b3-b0, 11/10/11, +-180     0.71 / 0.66 / 0.63 / 0.57 / 0.56          0.63  0.56
-	//	b2b3-b0, 9/12/9, +-256       0.72 / 0.75 / 0.71 / 0.44 / 0.53          0.63  0.44
-	//	b3-b0, 10/10/10, +-216       0.75 / 0.74 / 0.59 / 0.44 / 0.43          0.59  0.43
+	//	                     kappa 0-19 / 25-40 / 40-60 / 40-60b / 0-19b / 20-40b   mean  worst
+	//	b2b3-b0, 11/10/11, +-180    0.71 / 0.66 / 0.63 / 0.57 / 0.56 / 0.69       0.64  0.56
+	//	b2b3-b0, 9/12/9, +-256      0.72 / 0.75 / 0.71 / 0.44 / 0.53 / 0.53       0.61  0.44
+	//	b3-b0, 10/10/10, +-216      0.75 / 0.74 / 0.59 / 0.44 / 0.43 / 0.61       0.59  0.43
 	//
 	// The second recordings are the point: the same music recorded again scores
 	// up to 0.28 lower, as much as any difference between settings, so a
 	// setting tuned on one recording per stretch of music is partly tuned on
 	// that recording's noise. 9/12/9 won the first three and dropped to 0.44 on
-	// the next; 11/10/11 has the same mean over all five with the smallest
-	// spread, and was ahead on 0-19b, which no search saw. Leave-one-out over
+	// the next; 11/10/11 was chosen on the first four for the smallest spread
+	// and was ahead on both recordings made after the choice (0-19b, 20-40b).
+	// The least-used pattern gets 15-18%, 11% on 20-40b (9/12/9: 13%); cuts
+	// of +-150 keep it at 16% everywhere for a mean of 0.61. Leave-one-out over
 	// the first four (best on three, scored on the fourth) gives 0.61, 0.52,
 	// 0.61 and 0.44: expect ~0.55 on unseen recordings, and live runs on the same
 	// music have spanned 0.54-0.70. An earring switched on mid-music takes

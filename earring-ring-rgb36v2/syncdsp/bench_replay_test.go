@@ -390,8 +390,11 @@ func TestBenchCandidates(t *testing.T) {
 		name string
 		sp   selParams
 	}{
-		{"shipped 9/12/9 +-256", shipped()},
+		{"shipped", shipped()},
+		{"9/12/9 +-256", mk(b23, 9, 12, 9, [3]int32{-256, 0, 256})},
 		{"11/10/11 +-180", mk(b23, 11, 10, 11, [3]int32{-180, 0, 180})},
+		{"11/10/11 +-150", mk(b23, 11, 10, 11, [3]int32{-150, 0, 150})},
+		{"11/10/11 +-216", mk(b23, 11, 10, 11, [3]int32{-216, 0, 216})},
 		{"11/12/11 -148/32/212", mk(b23, 11, 12, 11, [3]int32{-148, 32, 212})},
 		{"11/12/11 +-180", mk(b23, 11, 12, 11, [3]int32{-180, 0, 180})},
 		{"11/11/11 +-180", mk(b23, 11, 11, 11, [3]int32{-180, 0, 180})},
@@ -415,7 +418,7 @@ func TestBenchCandidates(t *testing.T) {
 			pl, _ := replay(cp.L.recs, c.sp)
 			pr, _ := replay(cp.R.recs, c.sp)
 			s := benchScore(pl, pr, cp.idx, 0, len(cp.idx))
-			line += fmt.Sprintf(" %+.3f", s.kappa)
+			line += fmt.Sprintf(" %+.3f/%2.0f%%", s.kappa, 100*s.minOcc)
 			sum += s.kappa
 			worst = min(worst, s.kappa)
 			minOcc = min(minOcc, s.minOcc)
@@ -435,14 +438,14 @@ func TestBenchLateBoot(t *testing.T) {
 	if env == "" {
 		t.Skip("BENCH_CAPS not set")
 	}
-	b23 := [NBands]int32{-7, 0, 3, 4, 0, 0, 0, 0}
-	alt := shipped()
-	alt.weights, alt.centShift, alt.scaleShift, alt.gapShift = b23, 11, 10, 11
-	alt.cuts = [NumPatterns - 1]int32{-180, 0, 180}
+	old := shipped()
+	old.weights = [NBands]int32{-7, 0, 3, 4, 0, 0, 0, 0}
+	old.centShift, old.scaleShift, old.gapShift = 9, 12, 9
+	old.cuts = [NumPatterns - 1]int32{-256, 0, 256}
 	cands := []struct {
 		name string
 		sp   selParams
-	}{{"shipped 9/12/9 +-256", shipped()}, {"11/10/11 +-180", alt}}
+	}{{"shipped", shipped()}, {"9/12/9 +-256", old}}
 	const bin, bins = 15 * fps, 12
 	for _, c := range cands {
 		var late, base [bins]float64
