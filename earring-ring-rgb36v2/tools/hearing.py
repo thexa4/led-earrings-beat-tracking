@@ -12,11 +12,18 @@ changes band levels by *different* amounts, while the AGC moves all bands equall
 So the test is not "are the two spectra equal" - two working earrings are unequal,
 and that difference is the object of study. It is whether each unit *responds*:
 
-  pre-AGC rise  true (unnormalised) band energy when the sound starts, minus the
-            same in silence, in doublings. This is the primary test, and it is the
-            only one that cannot lie: the AGC holds the smoothed spectrum level, so
-            a working earring can look perfectly flat there. Reading only the
-            smoothed bands called a healthy unit deaf more than once.
+  band rise     the raw band energies when the sound starts against the same in
+            silence, as a ratio in doublings. This is the primary test, because the
+            AGC holds the smoothed spectrum level, so a working earring can look
+            perfectly flat there -- reading only the smoothed bands called a healthy
+            unit deaf more than once.
+            It is NOT pre-AGC, and used to be labelled that way. The raw column is
+            bank.energy, which the bank scales by gainShift (bank.go, dx :=
+            scalePow(x-b.hpX, b.gainShift)) before filtering, so the AGC's gain is
+            already inside it. Comparing two phases is still sound while the gain
+            holds still, which is what the gain column is there to check: if the
+            shift differs between the quiet and loud phase, the ratio has to be
+            corrected by the difference before it means anything.
   spread    p95-p5 of each band over a run, in doublings. A unit listening to music
             has several doublings of dynamic range; one listening to its own noise
             floor has a few tenths.
@@ -64,12 +71,17 @@ def phases(outdir):
     """Per-side (smoothed, raw, input peak, gain) from a capture by capture().
 
     Both spectra are returned because they answer different questions. `raw` is
-    this frame's true band energy before any normalisation, so it is where an
-    arriving sound actually shows up. `snap` is the smoothed spectrum the DSP
-    selects patterns from, deliberately level-normalised: the AGC exists to remove
-    exactly the change that says "sound started", so a unit that hears the speaker
-    perfectly well can look flat here. Testing only `snap` calls a working earring
-    deaf - which it did, repeatedly.
+    bank.energy: this frame's band magnitudes, summed linearly over the frame and
+    carrying the AGC's gain, so it is where an arriving sound actually shows up --
+    but as a LINEAR quantity, where `snap` is a Q8 logarithm. The two are not
+    interchangeable and no arithmetic may be shared between them: subtracting and
+    dividing by 256 turns a Q8 log2 difference into doublings and turns a linear
+    difference into nothing at all.
+
+    `snap` is the smoothed spectrum the DSP selects patterns from, deliberately
+    level-normalised: the AGC exists to remove exactly the change that says "sound
+    started", so a unit that hears the speaker perfectly well can look flat there.
+    Testing only `snap` calls a working earring deaf - which it did, repeatedly.
     """
     out = {}
     for name in ("L", "R"):
@@ -109,36 +121,71 @@ def main():
         sl, rl, pl, gl = l[name]
         s1, s2 = spread(sq), spread(sl)
         resp = s2.mean() - s1.mean()
-        # The level the AGC had to absorb: true energy before vs after the sound
-        # started. This is the honest "did sound arrive" measurement.
-        rise = (np.median(rl, axis=0) - np.median(rq, axis=0)) / 256.0
+        # Did the band energy actually rise when the sound started? raw is a
+        # LINEAR accumulated magnitude, so the answer is a ratio, taken in log2.
+        # This line used to read (median(rl) - median(rq)) / 256, which is the
+        # Q8-log2 recipe applied to a linear quantity: it agreed with the truth
+        # for ratios near 1 by coincidence and fell apart as soon as they were
+        # not. On a measured capture it reported -19.98 doublings for a band whose
+        # true ratio was 3900/9014 = -1.21, because 5114/256 happens to be 19.98.
+        # The sign survived, which is why the mistake was never obvious: the
+        # verdict this produced was right often enough to keep being trusted.
+        lo, lq = np.maximum(np.median(rl, axis=0), 1.0), np.maximum(np.median(rq, axis=0), 1.0)
+        rise = np.log2(lo / lq)
+        # The bank scales every sample by gainShift before filtering (bank.go),
+        # and energy sums magnitudes, so energy carries the gain: one bit of shift
+        # is exactly one doubling here whether or not the room changed. A unit
+        # whose gain moved between the phases therefore reports a rise it did not
+        # hear, and an uncorrected comparison can invert the sign.
+        dshift = float(np.median(gl) - np.median(gq))
+        rise = rise - dshift
         gain = float(np.median(rise))
+        if abs(dshift) >= 1:
+            print(f"  {name:4} gain moved {dshift:+.0f} bits between phases; "
+                  f"corrected out (raw ratio would have been "
+                  f"{gain + dshift:+.2f} dbl)")
         prof = (sl.mean(0) - sq.mean(0)) / 256.0
         shape = float(np.abs(prof - prof.mean()).mean())
         p5, p50, p95 = np.percentile(pl, [5, 50, 95])
         print(f"  {name:4} {p5:9.0f} {p50:8.0f} {p95:8.0f}   "
               f"{sorted(set(gl.astype(int).tolist()))}   "
               f"{s1.mean():8.2f} {s2.mean():8.2f} {resp:>+9.2f}"
-              f"   pre-AGC level rise {gain:+.2f} dbl")
-        print("       pre-AGC rise per band, doublings: "
+              f"   band energy rise {gain:+.2f} dbl")
+        print("       band energy rise per band, doublings: "
               + " ".join(f"{v:+.2f}" for v in rise))
         print("       smoothed profile change (AGC-corrected): "
               + " ".join(f"{v:+.1f}" for v in prof)
               + f"   band-selective part {shape:.2f}")
         # A unit with a working microphone and a speaker in the room shows a
-        # clear pre-AGC rise. Judge on that; the smoothed numbers are context.
+        # clear rise. Judge on that; the smoothed numbers are context.
         if gain < 0.7:
             bad.append(name)
+            # Before believing a failure, rule out the one thing that fakes it.
+            # These units inject their own LED refresh into the converter at up
+            # to +16400 counts, one sample wide, which is larger than any room
+            # signal and swamps the band energies it is meant to measure; see
+            # tools/haltab.py, which separates it by halting the CPU. A unit can
+            # be hearing perfectly and still fail this test because its own
+            # output is the loudest thing in its window.
+            print("       (before blaming this unit: run tools/haltab.py. Its own"
+                  " LED refresh is often the loudest thing in the window.)")
 
     print()
     if bad:
         print(f"  NO SOUND ARRIVING at: {' and '.join(bad)}")
-        print("  Its true (pre-AGC) band energy does not rise when the track starts,")
-        print("  so this unit is not measuring the speaker, and any cross-device")
-        print("  comparison measures that instead of the music. Check, in order:")
-        print("  the unit is not muted/asleep, the speaker is the sink ffplay picks")
-        print("  (wpctl status, default sink), sound actually leaves it, and only")
-        print("  then the unit's placement.")
+        print("  Its band energy does not rise when the track starts, so this unit")
+        print("  is not measuring the speaker, and any cross-device comparison")
+        print("  measures that instead of the music. But this test is easy to fail")
+        print("  for reasons that are not the microphone, so check in order:")
+        print("   1. tools/haltab.py --windows 20. These units inject their own LED")
+        print("      refresh into the converter at up to +16400 counts, one sample")
+        print("      wide, which is far larger than any room signal. An earring")
+        print("      that is animating can be hearing the room perfectly and still")
+        print("      show no rise, because its own output is the band energy.")
+        print("   2. The unit is not muted or asleep.")
+        print("   3. The speaker is the sink ffplay picks (wpctl status) and sound")
+        print("      actually leaves it.")
+        print("   4. Only then the unit's placement, then its hardware.")
         return 1
     print("  both earrings respond to the speaker; pair analysis is meaningful.")
     return 0

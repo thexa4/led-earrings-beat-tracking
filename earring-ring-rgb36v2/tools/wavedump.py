@@ -84,8 +84,15 @@ def main():
     base = telem.resolve_symbols(a.elf)["main.adcData"]
     devs = [(name, telem.OpenOCD(a.host, port)) for port, name in ((4445, "L"), (4446, "R"))]
 
-    fw = {name: csv.writer(open(f"{a.outdir}/wave-{name}.csv", "w", newline=""))
-          for name, _ in devs}
+    # The file handle is kept next to the writer rather than dropped. Writing
+    # through a csv.writer whose file is never closed leaves whatever is still in
+    # the buffer unwritten, so a short run could silently lose its whole capture
+    # while a long one looked fine purely because it overflowed the buffer. The
+    # crash on exit (csv.writer has no close) was the visible half of that.
+    files, fw = {}, {}
+    for name, _ in devs:
+        fh = open(f"{a.outdir}/wave-{name}.csv", "w", newline="")
+        files[name], fw[name] = fh, csv.writer(fh)
     for name, o in devs:
         fw[name].writerow([f"s{i}" for i in range(N)])
 
@@ -109,7 +116,8 @@ def main():
                       f"  (window p-p {max(x) - min(x)})")
         time.sleep(0.4)
     for name, o in devs:
-        fw[name].close()
+        files[name].flush()
+        files[name].close()
         o.close()
 
 
