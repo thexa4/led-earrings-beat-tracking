@@ -147,7 +147,7 @@ const (
 // PatternWeights collapse the smoothed spectrum into the one number the pattern
 // is read from (band 0 is >4 kHz, band 7 is <250 Hz). They must sum to zero, so
 // that a gain - the AGC's, or one microphone being quieter - cancels out.
-var PatternWeights = [NBands]int32{-7, 0, 0, 0, 7, 0, 0, 0}
+var PatternWeights = [NBands]int32{-7, 0, 0, 7, 0, 0, 0, 0}
 
 // Tunables. See PARTY-SYNC.md §11.
 const (
@@ -315,24 +315,29 @@ const (
 
 	// PatternCentroidShift, PatternScaleShift and PatternGapShift are the time
 	// constants of the centroid, of its reference and spread, and of the low-pass
-	// on its deviation, as shifts at 62.5 frames/s (9 = 8 s, 11 = 33 s, 12 = 66 s).
+	// on its deviation, as shifts at 62.5 frames/s (10 = 16 s).
 	//
-	// Chosen together with the cuts by replaying every combination over a real
-	// two-earring bench capture (20 min of the podcast, both earrings' spectra
-	// and beat events, tools/paircapture.py --state; see bench_replay_test.go),
-	// fitted on the first 10 minutes from a cold start and scored on the second:
+	// Chosen together with PatternWeights and the cuts by replaying every
+	// combination over two real two-earring bench captures of different stretches
+	// of the podcast (both earrings' spectra and beat events, tools/paircapture.py
+	// --state; TestBenchMulti in bench_replay_test.go), each from a cold start, and
+	// ranking by the worse of the two:
 	//
-	//	                          kappa fit/held-out   least-used pattern   stuck
-	//	11/12/9, cuts +-256        0.69 / 0.80          20% / 17%            23% / 13%
-	//	11/11/11, cuts +-150       0.49 / 0.84          11% / 16%            36% / 10%
-	//	9/11/9, wider weights      0.46 / 0.52          14% / 22%            37% / 33%
+	//	                                  kappa 0-19 min / 20-40 min   least-used pattern
+	//	b3-b0, 10/10/10, cuts +-216        0.75 / 0.74                  19% / 20%
+	//	b4-b0, 11/12/9, cuts +-256         0.75 / 0.60                  21% / 19%
+	//	b4-b0, 11/11/11, cuts +-150        0.67 / 0.65                  14% / 14%
+	//	best multi-band weights            0.57 / 0.56                  17% / 16%
 	//
-	// The simulated two-device sweep (podcast_pattern_test.go) preferred faster
-	// constants and wider weights; the real capture reverses both, so the
-	// simulation is a parity check here, not a tuner.
-	PatternCentroidShift = 11
-	PatternScaleShift    = 12
-	PatternGapShift      = 9
+	// b4-b0 at 11/12/9 was the winner on the first capture alone and lost 0.15 on
+	// the second, so a single stretch of music is not enough to tune on. The
+	// neighbours of the choice (b2/b3 splits, cuts +-180) all score 0.72-0.75. The
+	// simulated two-device sweep (podcast_pattern_test.go) prefers multi-band
+	// weights, which the real captures reject: the simulation is a parity check
+	// here, not a tuner.
+	PatternCentroidShift = 10
+	PatternScaleShift    = 10
+	PatternGapShift      = 10
 
 	// PatternCentroidScale is headroom on the stored centroid so that the EMAs'
 	// per-frame corrections stay in their linear range. It cancels in
@@ -341,9 +346,9 @@ const (
 
 	// PatternCut1..3 are the bucket boundaries, in Q8 units of the centroid's
 	// mean absolute deviation from its reference.
-	PatternCut1 = -256
+	PatternCut1 = -216
 	PatternCut2 = 0
-	PatternCut3 = 256
+	PatternCut3 = 216
 
 	// PatternMaxHoldFrames is the longest the pattern goes without being re-read
 	// (4 s), the backstop for a device whose musical triggers never fire. Above a

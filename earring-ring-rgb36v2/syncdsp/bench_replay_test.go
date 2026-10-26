@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -222,6 +223,10 @@ func loadBench(t *testing.T) (benchSide, benchSide, []int) {
 	if dir == "" {
 		t.Skip("BENCH_CAP not set")
 	}
+	return loadBenchDir(t, dir)
+}
+
+func loadBenchDir(t *testing.T, dir string) (benchSide, benchSide, []int) {
 	L, R := loadBenchSide(t, dir, "L"), loadBenchSide(t, dir, "R")
 	lag, c := alignLag(L, R, [NBands]int32{-7, -3, 0, 0, 3, 4, 0, 0})
 	t.Logf("L: %d frames (%.1f min), %d without telemetry; R: %d frames, %d without; residual lag %d frames (r=%.2f)",
@@ -356,6 +361,108 @@ func TestBenchSweep(t *testing.T) {
 		for _, r := range results {
 			if r.sp == want {
 				report("sim winner", r)
+			}
+		}
+	}
+}
+
+// TestBenchMulti scores every candidate on several captures, each replayed from a
+// cold start, and ranks by the worst capture: constants that only work on one
+// stretch of music do not work on a set.
+//
+//	BENCH_CAPS=dir1,dir2 go test -run TestBenchMulti -v -timeout 2h ./syncdsp/
+func TestBenchMulti(t *testing.T) {
+	env := os.Getenv("BENCH_CAPS")
+	if env == "" {
+		t.Skip("BENCH_CAPS not set")
+	}
+	type capture struct {
+		name string
+		L, R benchSide
+		idx  []int
+	}
+	var caps []capture
+	for _, dir := range strings.Split(env, ",") {
+		L, R, idx := loadBenchDir(t, dir)
+		caps = append(caps, capture{filepath.Base(dir), L, R, idx})
+	}
+	ok := func(s score) bool {
+		return s.minOcc >= 0.15 && s.chgA >= 0.5 && s.chgB >= 0.5 && s.chgA <= 8 && s.chgB <= 8 && s.shift <= 0.15
+	}
+	type result struct {
+		sp     selParams
+		scores []score
+		worst  float64
+		allOK  bool
+	}
+	run := func(sp selParams) result {
+		r := result{sp: sp, worst: 2, allOK: true}
+		for _, c := range caps {
+			pl, _ := replay(c.L.recs, sp)
+			pr, _ := replay(c.R.recs, sp)
+			s := benchScore(pl, pr, c.idx, 0, len(c.idx))
+			r.scores = append(r.scores, s)
+			r.worst = min(r.worst, s.kappa)
+			r.allOK = r.allOK && ok(s)
+		}
+		return r
+	}
+	weightSets := [][NBands]int32{
+		{-7, 0, 0, 0, 7, 0, 0, 0},
+		{-7, 0, 0, 0, 0, 7, 0, 0},
+		{-7, 0, 0, 0, 4, 3, 0, 0},
+		{-7, -3, 0, 0, 3, 7, 0, 0},
+		{-7, -3, -1, 1, 3, 7, 0, 0},
+		{-7, -4, -2, 0, 2, 4, 7, 0},
+		{-7, -5, -3, -1, 1, 3, 5, 7},
+		{-7, -3, 0, 0, 3, 4, 3, 0},
+		{-7, -4, 0, 0, 4, 4, 3, 0},
+		{-7, 0, 0, 7, 0, 0, 0, 0},
+		{-7, 0, 7, 0, 0, 0, 0, 0},
+		{-7, 0, 4, 3, 0, 0, 0, 0},
+		{-7, 0, 3, 4, 0, 0, 0, 0},
+		{-7, 0, 0, 4, 3, 0, 0, 0},
+		{-7, -3, 0, 7, 0, 0, 0, 0},
+		{-7, 0, 0, 7, 0, 0, 3, 0},
+	}
+	var results []result
+	for _, w := range weightSets {
+		for cs := int32(8); cs <= 11; cs++ {
+			for ss := int32(8); ss <= 13; ss++ {
+				for gs := int32(7); gs <= 11; gs++ {
+					for _, k := range []int32{128, 150, 180, 216, 256, 320} {
+						sp := shipped()
+						sp.weights, sp.centShift, sp.scaleShift, sp.gapShift = w, cs, ss, gs
+						sp.cuts = [NumPatterns - 1]int32{-k, 0, k}
+						results = append(results, run(sp))
+					}
+				}
+			}
+		}
+	}
+	sort.Slice(results, func(i, j int) bool {
+		a, b := results[i], results[j]
+		if a.allOK != b.allOK {
+			return a.allOK
+		}
+		return a.worst > b.worst
+	})
+	report := func(label string, r result) {
+		t.Logf("%s ok=%v worst kappa %+.3f  %s", label, r.allOK, r.worst, r.sp)
+		for i, s := range r.scores {
+			t.Logf("    %-14s %s", caps[i].name, s)
+		}
+	}
+	report("shipped", run(shipped()))
+	report("debug", run(debugSelector()))
+	for i := 0; i < 10 && i < len(results); i++ {
+		report(fmt.Sprintf("#%d", i+1), results[i])
+	}
+	for _, w := range weightSets {
+		for _, r := range results {
+			if r.sp.weights == w {
+				report("best for weights", r)
+				break
 			}
 		}
 	}
