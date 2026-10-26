@@ -623,6 +623,53 @@ static void bitbang_update_bitplane_4(uint32_t led0, uint32_t led1, uint32_t led
     );
 }
 
+// Bitplanes for one group of three LEDs, from four pin slots:
+//
+//	a: PA15, PA10, PA9   b: PA8, PA7, PA6   c: PA5, PA4, PA3   d: PA2, PA1, PA0
+//
+// Each group drives three of the slots; the caller passes 0 (off) for the slot
+// whose pins are that group's common line. The inputs are inverted up front
+// instead of XORing each bitplane, so the off slot comes out as all ones, which
+// is what the per-group versions produced by shifting in a gap and XORing it.
+#define BB_ADC "adcs %[tmp], %[tmp], %[tmp]\n\t"
+#define BB_ROT(r) "rors %[" r "], %[N8]\n\t"
+#define BB_FIRST(r) "lsrs %[" r "], #4\n\t"
+#define BB_NEXT(r) BB_ROT(r) "lsrs %[" r "], #9\n\t"
+#define BB_SLOT(start, r, gap) start(r) BB_ADC gap BB_ROT(r) BB_ADC BB_ROT(r) BB_ADC
+#define BB_PLANE(start) \
+    BB_SLOT(start, "a", "lsls %[tmp], #4\n\t") /* gap between PA15 and PA10 */ \
+    BB_SLOT(start, "b", "") BB_SLOT(start, "c", "") BB_SLOT(start, "d", "")
+
+static void bitbang_update_bitplane(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t *bitplane) {
+    uint32_t tmp;
+    uint32_t N8 = 8;
+
+    __asm__ __volatile__(
+        "mvns %[a], %[a]\n\t"
+        "mvns %[b], %[b]\n\t"
+        "mvns %[c], %[c]\n\t"
+        "mvns %[d], %[d]\n\t"
+
+        // Not clearing %[tmp]: the 1 and 2 cycle bitplanes shift all 32 bits out.
+        BB_PLANE(BB_FIRST) // 1 cycle bitplane
+        BB_PLANE(BB_NEXT)  // 2 cycle bitplane
+        "str %[tmp], [%[bitplane]]\n\t"
+        BB_PLANE(BB_NEXT)  // 4 cycle bitplane
+        BB_PLANE(BB_NEXT)  // 8 cycle bitplane
+        "str %[tmp], [%[bitplane], #4]\n\t"
+        BB_PLANE(BB_NEXT)  // 16 cycle bitplane (upper bits are the 8 cycle one)
+        "str %[tmp], [%[bitplane], #8]\n\t"
+
+        : [tmp]"=&r"(tmp),
+          [a]"+&r"(a),
+          [b]"+&r"(b),
+          [c]"+&r"(c),
+          [d]"+&r"(d)
+        : [bitplane]"r"(bitplane),
+          [N8]"r"(N8)
+    );
+}
+
 // This is one giant assembly function that will update all LEDs.
 static void bitbang_show_leds(volatile uint32_t *bitplanes, volatile void *gpio) {
     uint32_t v1, v2;
