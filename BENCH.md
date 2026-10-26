@@ -156,27 +156,29 @@ Two traps in the AGC itself (constants in `syncdsp/consts.go`):
 
 ## 3. Two-device alignment
 
-- **The analysis frame rate is not timer-paced.** `main.go` increments `frame` once
-  every twelve iterations of a free-running loop whose duration is the LED
-  bit-bang, so the analysis rate is software timing and follows what the LEDs are
-  doing. Measured over ~2100 s of one capture the two earrings advanced 130992 and
-  129701 frames, 1.0% apart, so the skew between them grows as a clean monotone ramp
-  reaching **21 s**, and an older capture shows 32.9 s/hour.
-- **The sample clock is not the cause — frames are dropped, not samples.**
-  `tools/rate.py` measures the real ADC rate straight from the DMA transfer counter:
-  both units run at ~16 kSPS with no dropped triggers. So the ring wraps at the
-  configured rate and the analysis simply fails to service every wrap, because the
-  loop is busy bit-banging. Which wraps get skipped depends on the animation, so two
-  units showing different colours fall behind at different rates and the divergence
-  is content-dependent rather than a fixed oscillator offset. Fix the frame pacing
-  (timer-driven, one wrap in, one frame out) before expecting any pair to agree.
-  Consequence for every analysis meanwhile: pairing rows by **host poll index is
-  wrong** and gets worse through the run. Each capture carries the device's own
-  `frame` counter, which counts audio frames and is the only honest time axis; align
-  on that. Do not fit a slope *and* intercept per-window by cross-correlation — with
-  a 16 s low-pass in the signal the fit is ill-conditioned (measured residual 33 s)
-  and can absorb real disagreement. Take the slope from the counters, and fit at most
-  one constant for the boot offset.
+- **The two devices' counters drift apart, and it does not matter.** Measured over an
+  hour against the shared host clock, the analysis frame counters diverge
+  monotonically by about 1% — roughly 30 s of audio — because the loop is free-running
+  (`main.go` increments `frame` every twelve iterations of a loop whose length is the
+  LED bit-bang) and nothing paces it. It is tempting to treat this as *the* reason a
+  pair disagrees. It is not: resampling one device onto the other's time axis, which
+  removes the drift completely, moves pattern agreement from 27.4% to 28.3%. Fix the
+  pacing if you want reproducible absolute timing; do not expect it to align anything.
+- **Matching two devices by counter *value* is circular and proves nothing.** A frame
+  counter measures the device's own time, not the room's. Searching one device's rows
+  for the row whose counter is closest to the other's will always find a match within
+  a poll interval, which looks like beautiful synchronisation and is an artifact of the
+  search. It produced a confident "skew is only ±6 frames, drift is dead" here, on the
+  same data that shows 30 s of divergence. The same trap in reverse makes a
+  counter-derived skew look like a clean ramp.
+  Room time is the **host clock**: both pollers run in one process and stamp a shared
+  `t`, so same-`t` *is* the same room moment, and that is the only honest pairing. Use
+  the device counter for one thing only — checking that analysis actually advanced
+  (`paircapture.py` asserts it) — and state which axis any comparison used.
+- Do not fit a slope *and* intercept per window by cross-correlation to find an offset:
+  against a 16 s low-pass the fit is ill-conditioned (measured residual 33 s) and it
+  will absorb genuine disagreement into the offset, which is how a pair with nothing in
+  common can be made to look synchronised.
 - Decide explicitly whether each tool's time column is a **shared** wall clock or a
   per-poller clock. `specdump.py` runs both pollers in one process so its `t` is
   shared; the telemetry poller stamps rows when it drains the device ring, so its
