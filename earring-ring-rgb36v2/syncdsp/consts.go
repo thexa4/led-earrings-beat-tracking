@@ -315,31 +315,37 @@ const (
 
 	// PatternCentroidShift, PatternScaleShift and PatternGapShift are the time
 	// constants of the centroid, of its reference and spread, and of the low-pass
-	// on its deviation, as shifts at 62.5 frames/s (9 = 8 s, 12 = 66 s).
+	// on its deviation, as shifts at 62.5 frames/s (9 = 8 s, 10 = 16 s,
+	// 11 = 33 s, 12 = 66 s).
 	//
 	// Chosen together with PatternWeights and the cuts by replaying every
-	// combination over three real two-earring bench captures covering the whole
-	// podcast without overlap (both earrings' spectra and beat events,
-	// tools/paircapture.py --state; TestBenchMulti and TestBenchFine in
-	// bench_replay_test.go), each from a cold start, ranking by the worst:
+	// combination over real two-earring bench captures (both earrings' spectra
+	// and beat events, tools/paircapture.py --state; TestBenchMulti,
+	// TestBenchFine and TestBenchCandidates in bench_replay_test.go), each from
+	// a cold start. The captures are 0-19, 25-40 and 40-60 min of the podcast,
+	// plus a second recording of 40-60 and of 0-19 made on another day:
 	//
-	//	                                  kappa 0-19 / 25-40 / 40-60 min   least-used pattern
-	//	b2b3-b0, 9/12/9, cuts +-256        0.72 / 0.75 / 0.71                16%-18%
-	//	b3-b0, 10/10/10, cuts +-216        0.75 / 0.74 / 0.59                18%-20%
-	//	b4-b0, 11/11/11, cuts +-150        0.67 / 0.65 / 0.35                14%
+	//	                            kappa 0-19 / 25-40 / 40-60 / 40-60b / 0-19b   mean  worst
+	//	b2b3-b0, 11/10/11, +-180     0.71 / 0.66 / 0.63 / 0.57 / 0.56          0.63  0.56
+	//	b2b3-b0, 9/12/9, +-256       0.72 / 0.75 / 0.71 / 0.44 / 0.53          0.63  0.44
+	//	b3-b0, 10/10/10, +-216       0.75 / 0.74 / 0.59 / 0.44 / 0.43          0.59  0.43
 	//
-	// Every choice made on fewer captures lost on the next one (10/10/10 was the
-	// best on the first two), so expect less on unseen music: chosen on two and
-	// scored on the third, the best candidate scores 0.71, 0.71 and 0.61. The
-	// neighbours (b3-b0 alone, 11/9/10 with cuts +-180) score within 0.01. The
-	// cost of the slow reference is the start: an earring switched on mid-music
-	// takes about two minutes to reach 70% agreement, against 75 s at 10/10/10.
-	// The simulated two-device sweep (podcast_pattern_test.go) prefers multi-band
-	// weights, which the real captures reject: the simulation is a parity check
-	// here, not a tuner.
-	PatternCentroidShift = 9
-	PatternScaleShift    = 12
-	PatternGapShift      = 9
+	// The second recordings are the point: the same music recorded again scores
+	// up to 0.28 lower, as much as any difference between settings, so a
+	// setting tuned on one recording per stretch of music is partly tuned on
+	// that recording's noise. 9/12/9 won the first three and dropped to 0.44 on
+	// the next; 11/10/11 has the same mean over all five with the smallest
+	// spread, and was ahead on 0-19b, which no search saw. Leave-one-out over
+	// the first four (best on three, scored on the fourth) gives 0.61, 0.52,
+	// 0.61 and 0.44: expect ~0.55 on unseen recordings, and live runs on the same
+	// music have spanned 0.54-0.70. An earring switched on mid-music takes
+	// about two minutes to reach steady agreement with either setting
+	// (TestBenchLateBoot). The simulated two-device sweep
+	// (podcast_pattern_test.go) prefers multi-band weights, which the real
+	// captures reject: the simulation is a parity check here, not a tuner.
+	PatternCentroidShift = 11
+	PatternScaleShift    = 10
+	PatternGapShift      = 11
 
 	// PatternCentroidScale is headroom on the stored centroid so that the EMAs'
 	// per-frame corrections stay in their linear range. It cancels in
@@ -348,9 +354,9 @@ const (
 
 	// PatternCut1..3 are the bucket boundaries, in Q8 units of the centroid's
 	// mean absolute deviation from its reference.
-	PatternCut1 = -256
+	PatternCut1 = -180
 	PatternCut2 = 0
-	PatternCut3 = 256
+	PatternCut3 = 180
 
 	// PatternMaxHoldFrames is the longest the pattern goes without being re-read
 	// (4 s), the backstop for a device whose musical triggers never fire. Above a

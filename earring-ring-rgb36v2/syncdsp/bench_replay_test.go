@@ -371,6 +371,117 @@ func TestBenchSweep(t *testing.T) {
 // stretch of music do not work on a set.
 //
 //	BENCH_CAPS=dir1,dir2 go test -run TestBenchMulti -v -timeout 2h ./syncdsp/
+//
+// TestBenchCandidates scores a fixed list of selector settings on every
+// capture in BENCH_CAPS: for checking finalists on captures the searches did
+// not see.
+func TestBenchCandidates(t *testing.T) {
+	env := os.Getenv("BENCH_CAPS")
+	if env == "" {
+		t.Skip("BENCH_CAPS not set")
+	}
+	mk := func(w [NBands]int32, cs, ss, gs int32, cuts [NumPatterns - 1]int32) selParams {
+		sp := shipped()
+		sp.weights, sp.centShift, sp.scaleShift, sp.gapShift, sp.cuts = w, cs, ss, gs, cuts
+		return sp
+	}
+	b23 := [NBands]int32{-7, 0, 3, 4, 0, 0, 0, 0}
+	cands := []struct {
+		name string
+		sp   selParams
+	}{
+		{"shipped 9/12/9 +-256", shipped()},
+		{"11/10/11 +-180", mk(b23, 11, 10, 11, [3]int32{-180, 0, 180})},
+		{"11/12/11 -148/32/212", mk(b23, 11, 12, 11, [3]int32{-148, 32, 212})},
+		{"11/12/11 +-180", mk(b23, 11, 12, 11, [3]int32{-180, 0, 180})},
+		{"11/11/11 +-180", mk(b23, 11, 11, 11, [3]int32{-180, 0, 180})},
+		{"10/12/10 +-216", mk(b23, 10, 12, 10, [3]int32{-216, 0, 216})},
+		{"7de1b4b b3-b0 10/10/10 +-216", mk([NBands]int32{-7, 0, 0, 7, 0, 0, 0, 0}, 10, 10, 10, [3]int32{-216, 0, 216})},
+		{"debug", debugSelector()},
+	}
+	type capture struct {
+		name string
+		L, R benchSide
+		idx  []int
+	}
+	var caps []capture
+	for _, dir := range strings.Split(env, ",") {
+		L, R, idx := loadBenchDir(t, dir)
+		caps = append(caps, capture{filepath.Base(dir), L, R, idx})
+	}
+	for _, c := range cands {
+		line, sum, worst, minOcc := "", 0.0, 2.0, 1.0
+		for _, cp := range caps {
+			pl, _ := replay(cp.L.recs, c.sp)
+			pr, _ := replay(cp.R.recs, c.sp)
+			s := benchScore(pl, pr, cp.idx, 0, len(cp.idx))
+			line += fmt.Sprintf(" %+.3f", s.kappa)
+			sum += s.kappa
+			worst = min(worst, s.kappa)
+			minOcc = min(minOcc, s.minOcc)
+		}
+		t.Logf("%-30s mean %+.3f worst %+.3f minOcc %4.1f%% |%s", c.name,
+			sum/float64(len(caps)), worst, 100*minOcc, line)
+	}
+}
+
+// TestBenchLateBoot measures how fast an earring that boots into running music
+// catches up: R is replayed fresh from a boot point (every 2 minutes from
+// minute 2) while L has been running since the start, and the agreement is
+// averaged per 15 s after boot over all boot points and BENCH_CAPS captures,
+// next to the agreement the same stretches have when both run from the start.
+func TestBenchLateBoot(t *testing.T) {
+	env := os.Getenv("BENCH_CAPS")
+	if env == "" {
+		t.Skip("BENCH_CAPS not set")
+	}
+	b23 := [NBands]int32{-7, 0, 3, 4, 0, 0, 0, 0}
+	alt := shipped()
+	alt.weights, alt.centShift, alt.scaleShift, alt.gapShift = b23, 11, 10, 11
+	alt.cuts = [NumPatterns - 1]int32{-180, 0, 180}
+	cands := []struct {
+		name string
+		sp   selParams
+	}{{"shipped 9/12/9 +-256", shipped()}, {"11/10/11 +-180", alt}}
+	const bin, bins = 15 * fps, 12
+	for _, c := range cands {
+		var late, base [bins]float64
+		var n [bins]float64
+		for _, dir := range strings.Split(env, ",") {
+			L, R, idx := loadBenchDir(t, dir)
+			pl, _ := replay(L.recs, c.sp)
+			pr, _ := replay(R.recs, c.sp)
+			for i0 := int(2 * 60 * fps); i0+bins*bin < len(idx); i0 += int(2 * 60 * fps) {
+				j0 := idx[i0]
+				if j0 < 0 {
+					continue
+				}
+				pb, _ := replay(R.recs[j0:], c.sp)
+				for b := range bins {
+					for i := i0 + b*bin; i < i0+(b+1)*bin; i++ {
+						j := idx[i]
+						if j < j0 || j-j0 >= len(pb) {
+							continue
+						}
+						n[b]++
+						if pl[i] == pb[j-j0] {
+							late[b]++
+						}
+						if pl[i] == pr[j] {
+							base[b]++
+						}
+					}
+				}
+			}
+		}
+		line := ""
+		for b := range bins {
+			line += fmt.Sprintf(" %3.0f/%3.0f", 100*late[b]/n[b], 100*base[b]/n[b])
+		}
+		t.Logf("%-22s late/steady agree %% per 15 s:%s", c.name, line)
+	}
+}
+
 func TestBenchMulti(t *testing.T) {
 	env := os.Getenv("BENCH_CAPS")
 	if env == "" {
