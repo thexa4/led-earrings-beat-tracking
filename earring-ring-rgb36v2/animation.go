@@ -118,9 +118,9 @@ func animationNeedsMic(mode int) bool {
 func newFrame(mode, variant, frame int) {
 	switch mode {
 	case modeVUMeter:
-		addPower(uint16(processSamples()))
+		micUpdate()
 	case modeFireSound:
-		addPower(uint16(processSamples()))
+		micUpdate()
 		vol := uint8(min(currentVolume()*3/512, 0xff))
 		volumeHistoryIndex++
 		if volumeHistoryIndex == 36 {
@@ -456,7 +456,7 @@ var sparkleColors [numLEDs]Color
 var sparkleBrightness [numLEDs]uint8
 
 func sparkleNextFrame(variant int) {
-	addPower(uint16(processSamples()))
+	micUpdate()
 
 	vol := int(currentVolume()) - 4096
 

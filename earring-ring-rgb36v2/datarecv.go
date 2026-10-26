@@ -90,10 +90,7 @@ func adcDelaySamples(samples uint32) {
 		stm32.DMA1.CH[0].CR.ClearBits(stm32.DMA_CH_CR_EN)
 		stm32.DMA1.CH[0].CR.Get()
 		for range samples {
-			for stm32.TIM22.CNT.Get() != 0 {
-			}
-			for stm32.TIM22.CNT.Get() == 0 {
-			}
+			waitSamplePeriod()
 		}
 
 		stm32.DMA1.CH[0].CR.SetBits(stm32.DMA_CH_CR_EN)
@@ -107,36 +104,44 @@ func adcDelaySamples(samples uint32) {
 	}
 }
 
+// dmaInWindow reports 1 while the DMA is writing into window w (0 or 1) of
+// adcData. Out of line for the same reason as waitSamplePeriod.
+//
+//go:noinline
+func dmaInWindow(w uint32) uint32 {
+	if adcDataWriteIndex() >= windowSize {
+		return w
+	}
+	return w ^ 1
+}
+
+// waitSamplePeriod waits for the sample timer to wrap once. Kept out of line:
+// inlined, LLVM unrolls both spin loops and the loop around them four ways each.
+//
+//go:noinline
+func waitSamplePeriod() {
+	for stm32.TIM22.CNT.Get() != 0 {
+	}
+	for stm32.TIM22.CNT.Get() == 0 {
+	}
+}
+
 // Wait until the write pointer is in the next window, and update
 // adcDataNormalized so it contains the data for the window that's ready.
 //
 //go:noinline
 func adcDataNextWindow(delayBefore uint32) {
-	var rawSamples []uint16
-	switch adcWriteWindow {
-	case 0:
-		if adcDataWriteIndex() >= windowSize {
-			// Shouldn't be in the next window already!
-			println("overflow!")
-		}
-		for adcDataWriteIndex() < windowSize {
-			// Make sure it's in the next window.
-		}
-		adcDelaySamples(delayBefore)
-		adcWriteWindow = 1 // next window
-		rawSamples = adcData[:windowSize]
-	default:
-		if adcDataWriteIndex() < windowSize {
-			// Shouldn't be in the first window already!
-			println("overflow!")
-		}
-		for adcDataWriteIndex() >= windowSize {
-			// Make sure it's in the first window.
-		}
-		adcDelaySamples(delayBefore)
-		adcWriteWindow = 0 // next window
-		rawSamples = adcData[windowSize : windowSize*2]
+	// The DMA is filling window w; wait until it has moved on to the other one.
+	w := uint32(adcWriteWindow)
+	if dmaInWindow(w) == 0 {
+		// Shouldn't be in the next window already!
+		println("overflow!")
 	}
+	for dmaInWindow(w) != 0 {
+	}
+	adcDelaySamples(delayBefore)
+	adcWriteWindow = uint8(w ^ 1) // next window
+	rawSamples := adcData[w*windowSize : w*windowSize+windowSize]
 
 	// Adjust samples by DC offset.
 	// At the same time, also sum up all the samples it reads so we can

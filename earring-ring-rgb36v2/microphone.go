@@ -20,6 +20,15 @@ var (
 
 var powerNormalizer uint32 = 100 // ~silence will result in about 500
 
+// micUpdate folds the samples collected in the last frame into the volume. Not
+// inlined: it has three callers, and inlined it is three copies of the unrolled
+// sample loop.
+//
+//go:noinline
+func micUpdate() {
+	addPower(uint16(processSamples()))
+}
+
 // Take current power, smooth it out a little, and auto-normalize it so it
 // doesn't change too strongly and animations can be written for it somewhat
 // reasonably.
