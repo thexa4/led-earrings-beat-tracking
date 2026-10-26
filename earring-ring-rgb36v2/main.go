@@ -18,9 +18,7 @@ func main() {
 	initHardware()
 
 	// Zero all LEDs.
-	for i := 0; i < 12; i++ {
-		setLEDs(i, 0, 0, 0)
-	}
+	clearLEDs()
 
 	index := 0 // 0..11, group of 3 LEDs that will be updated together
 	frame := 0
@@ -35,12 +33,7 @@ func main() {
 	if mode < len(modeVariants) {
 		variant = int(modeVariants[mode])
 	}
-	if animationNeedsMic(mode) {
-		enableMic()
-	}
-	if mode == modeSync {
-		startSync()
-	}
+	startModeAudio(mode)
 	initMode(mode)
 	modeFramesPressed := 0
 	previousMode := 0
@@ -98,11 +91,7 @@ func main() {
 					mode = previousMode
 
 					// Woke up again, so start up interfaces.
-					if mode == modeSync {
-						startSync()
-					} else if animationNeedsMic(mode) {
-						enableMic()
-					}
+					startModeAudio(mode)
 				}
 			} else {
 				if !modePressed && modeFramesPressed > 0 {
@@ -119,9 +108,7 @@ func main() {
 					saveState()
 
 					// Clear LEDs before moving on to the next mode.
-					for i := 0; i < 12; i++ {
-						setLEDs(i, 0, 0, 0)
-					}
+					clearLEDs()
 
 					// Leave whatever audio setup the previous mode had, then
 					// configure for the new mode. Disabling both (each is a
@@ -133,11 +120,7 @@ func main() {
 					disableMic()
 
 					// Only enable the microphone when needed.
-					if mode == modeSync {
-						startSync()
-					} else if animationNeedsMic(mode) {
-						enableMic()
-					}
+					startModeAudio(mode)
 
 					initMode(mode)
 				}
@@ -188,6 +171,27 @@ func main() {
 				modeFramesPressed = 0
 			}
 		}
+	}
+}
+
+// clearLEDs turns every LED off in the bitplanes; the next updateLEDs shows it.
+//
+//go:noinline
+func clearLEDs() {
+	for i := 0; i < 12; i++ {
+		setLEDs(i, 0, 0, 0)
+	}
+}
+
+// startModeAudio starts whatever audio input mode needs: the sync pipeline or
+// the microphone (or nothing).
+//
+//go:noinline
+func startModeAudio(mode int) {
+	if mode == modeSync {
+		startSync()
+	} else if animationNeedsMic(mode) {
+		enableMic()
 	}
 }
 
