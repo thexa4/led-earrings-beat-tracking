@@ -467,3 +467,158 @@ func TestBenchMulti(t *testing.T) {
 		}
 	}
 }
+
+// TestBenchFine is TestBenchMulti around the chosen region, adding asymmetric
+// cuts, the backstop hold and the refractory, and reports leave-one-out: the
+// best candidate on all captures but one, scored on the one left out - the
+// number to expect on music the tuning has not seen.
+//
+//	BENCH_CAPS=dir1,dir2,dir3 go test -run TestBenchFine -v -timeout 2h ./syncdsp/
+func TestBenchFine(t *testing.T) {
+	env := os.Getenv("BENCH_CAPS")
+	if env == "" {
+		t.Skip("BENCH_CAPS not set")
+	}
+	type capture struct {
+		name string
+		L, R benchSide
+		idx  []int
+	}
+	var caps []capture
+	for _, dir := range strings.Split(env, ",") {
+		L, R, idx := loadBenchDir(t, dir)
+		caps = append(caps, capture{filepath.Base(dir), L, R, idx})
+	}
+	ok := func(s score) bool {
+		return s.minOcc >= 0.15 && s.chgA >= 0.5 && s.chgB >= 0.5 && s.chgA <= 6 && s.chgB <= 6 && s.shift <= 0.15
+	}
+	type result struct {
+		sp     selParams
+		scores []score
+	}
+	eval := func(sp selParams) result {
+		r := result{sp: sp}
+		for _, c := range caps {
+			pl, _ := replay(c.L.recs, sp)
+			pr, _ := replay(c.R.recs, sp)
+			r.scores = append(r.scores, benchScore(pl, pr, c.idx, 0, len(c.idx)))
+		}
+		return r
+	}
+	weightSets := [][NBands]int32{
+		{-7, 0, 0, 7, 0, 0, 0, 0},
+		{-7, 0, 3, 4, 0, 0, 0, 0},
+		{-7, 0, 7, 0, 0, 0, 0, 0},
+		{-7, 0, 0, 4, 3, 0, 0, 0},
+		{-7, 0, 0, 0, 7, 0, 0, 0},
+	}
+	var results []result
+	for _, w := range weightSets {
+		for cs := int32(9); cs <= 11; cs++ {
+			for ss := int32(9); ss <= 12; ss++ {
+				for gs := int32(9); gs <= 11; gs++ {
+					for _, k := range []int32{180, 216, 256} {
+						for _, off := range []int32{-64, -32, 0, 32, 64} {
+							for _, hold := range []int32{250, 500} {
+								for _, ref := range []int32{PatternRefractoryBeats, 2 * PatternRefractoryBeats} {
+									sp := shipped()
+									sp.weights, sp.centShift, sp.scaleShift, sp.gapShift = w, cs, ss, gs
+									sp.cuts = [NumPatterns - 1]int32{off - k, off, off + k}
+									sp.maxHold, sp.refractory = hold, ref
+									results = append(results, eval(sp))
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	// rank orders by the worst kappa over the captures in use, constraint first.
+	rank := func(use func(int) bool) []result {
+		rs := append([]result(nil), results...)
+		key := func(r result) (bool, float64) {
+			allOK, worst := true, 2.0
+			for i, s := range r.scores {
+				if use(i) {
+					allOK = allOK && ok(s)
+					worst = min(worst, s.kappa)
+				}
+			}
+			return allOK, worst
+		}
+		sort.SliceStable(rs, func(i, j int) bool {
+			oa, wa := key(rs[i])
+			ob, wb := key(rs[j])
+			if oa != ob {
+				return oa
+			}
+			return wa > wb
+		})
+		return rs
+	}
+	report := func(label string, r result) {
+		t.Logf("%s  %s ref=%d", label, r.sp, r.sp.refractory)
+		for i, s := range r.scores {
+			t.Logf("    %-14s ok=%-5v %s", caps[i].name, ok(s), s)
+		}
+	}
+	report("shipped", eval(shipped()))
+	all := rank(func(int) bool { return true })
+	for i := 0; i < 8; i++ {
+		report(fmt.Sprintf("all #%d", i+1), all[i])
+	}
+	for out := range caps {
+		best := rank(func(i int) bool { return i != out })[0]
+		report(fmt.Sprintf("leave out %s: best on the rest, scored on %s", caps[out].name, caps[out].name), best)
+	}
+}
+
+// TestBenchDecompose splits the shipped selector's disagreement into the part the
+// feature causes - the two earrings' z on opposite sides of a cut - and the part
+// the commit timing adds on top, by scoring the instantaneous bucket of z next to
+// the committed pattern.
+func TestBenchDecompose(t *testing.T) {
+	env := os.Getenv("BENCH_CAPS")
+	if env == "" {
+		t.Skip("BENCH_CAPS not set")
+	}
+	sp := shipped()
+	bucket := func(z int16) int8 {
+		p := int8(0)
+		for _, c := range sp.cuts {
+			if int32(z) > c {
+				p++
+			}
+		}
+		return p
+	}
+	for _, dir := range strings.Split(env, ",") {
+		L, R, idx := loadBenchDir(t, dir)
+		pl, zl := replay(L.recs, sp)
+		pr, zr := replay(R.recs, sp)
+		il := make([]int8, len(zl))
+		ir := make([]int8, len(zr))
+		for i := range zl {
+			il[i] = bucket(zl[i])
+		}
+		for i := range zr {
+			ir[i] = bucket(zr[i])
+		}
+		var sx, sy, sxx, syy, sxy, n float64
+		var hist [9]int
+		for i := PatternWarmupFrames; i < len(idx); i++ {
+			if idx[i] < 0 {
+				continue
+			}
+			x, y := float64(zl[i]), float64(zr[idx[i]])
+			sx, sy, sxx, syy, sxy, n = sx+x, sy+y, sxx+x*x, syy+y*y, sxy+x*y, n+1
+			d := int(math.Abs(x-y)) / 64
+			hist[min(d, 8)]++
+		}
+		c := (sxy - sx*sy/n) / math.Sqrt((sxx-sx*sx/n)*(syy-sy*sy/n))
+		t.Logf("%s: corr(zL, zR) %.3f, |zL-zR| in 64ths of a spread: %v", filepath.Base(dir), c, hist)
+		t.Logf("    committed      %s", benchScore(pl, pr, idx, 0, len(idx)))
+		t.Logf("    instantaneous  %s", benchScore(il, ir, idx, 0, len(idx)))
+	}
+}
