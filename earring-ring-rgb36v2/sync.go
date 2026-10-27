@@ -294,12 +294,16 @@ var _ [numNoisePatterns - syncdsp.NumPatterns]struct{} // every pattern has a pa
 //	1  classic: the music-chosen palette with a flash on each beat
 //	2  the uploaded program in custom slot 0, with the sync data block live
 //	3  the same for slot 1
+//	4  interference pulse (patterns.go)
+//	5  synthwave (patterns.go)
 //
 // Until flash ran out there was also a hash readout, an instrument for
 // checking earrings against each other (section hash as a color, a dot
 // chasing the beat); it is an uploadable program now, in SYNC-PROGRAMS.md.
+//
+//go:noinline
 func syncAnimate(led, variant int) Color {
-	if variant >= 2 {
+	if variant&^1 == 2 {
 		return showCustom(led, syncMillis(), variant-2)
 	}
 
@@ -307,7 +311,9 @@ func syncAnimate(led, variant int) Color {
 	// pure function, identical on every device); the noise palettes give
 	// them visibly different looks.
 	var c Color
-	if variant == 0 {
+	if variant >= 4 {
+		c = syncPattern(led, variant)
+	} else if variant == 0 {
 		c = noise(led, syncNoiseT, syncVariant).Scale(syncBright)
 
 		// Glitter: up to 1 in 8 LEDs, more the louder the highs, each held

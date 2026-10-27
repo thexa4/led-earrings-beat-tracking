@@ -30,8 +30,8 @@ func main() {
 	index := 0 // 0..11, group of 3 LEDs that will be updated together
 	frame := 0
 	mode := int(storedState[stateOffsetMode])
-	// modeCustom2 was removed; state saved by old firmware may contain a now
-	// invalid mode (10 used to be custom2, 14 used to be QA).
+	// State saved by older firmware may contain a now invalid mode (modes
+	// have been removed and added).
 	if mode >= modeLast && mode != modeTest && mode != modeQA {
 		mode = 0
 		storedState[stateOffsetMode] = 0

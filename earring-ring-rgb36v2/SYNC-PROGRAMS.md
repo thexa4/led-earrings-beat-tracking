@@ -25,6 +25,8 @@ pattern in the normal web editor; nothing about uploading changes.
    | 2 | **classic**: the music's color scheme with a short flash on every beat |
    | 3 | **your pattern** from the first custom mode, with the music data |
    | 4 | **your pattern** from the second custom mode, with the music data |
+| 5 | **interference pulse**: two rainbow waves running around the ring at slightly different speeds, with a white flash on the beat that fades out until the next one |
+| 6 | **synthwave**: the ring strobes red and cyan, white for the first quarter of every beat |
 
 When you switch to variant 3 or 4 the earring waits about a second before
 it starts your pattern, just like the custom pattern modes do. If a slot is

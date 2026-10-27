@@ -12,26 +12,18 @@ package main
 
 // palette16At returns the palette color at a 16-bit position, interpolating
 // between neighbours and wrapping at the top. Bit-identical to
-// ledsgo.Palette16.ColorAt.
-func palette16At(p string, position uint16) (r, g, b uint8) {
-	index := position >> 12
-	next := index + 1
-	if index >= 15 {
-		next = 0
-	}
-	frac := uint8(position >> 4)
-	r = blend8(uint8(p[index*3]), uint8(p[next*3]), frac)
-	g = blend8(uint8(p[index*3+1]), uint8(p[next*3+1]), frac)
-	b = blend8(uint8(p[index*3+2]), uint8(p[next*3+2]), frac)
-	return r, g, b
+// ledsgo.Palette16.ColorAt. Shared by noise and the ported patterns'
+// rainbow, hence not inlined.
+//
+//go:noinline
+func palette16At(p string, position uint16) Color {
+	index := int(position >> 12)
+	next := (index + 1) & 15
+	return mix(paletteEntry(p, index), paletteEntry(p, next), uint8(position>>4))
 }
 
-// blend8 mixes top into bottom by topAlpha. Identical arithmetic to
-// ledsgo.blend for 32-bit targets.
-func blend8(bottom, top, topAlpha uint8) uint8 {
-	bottomPart := int(bottom) * (255 - int(topAlpha))
-	topPart := int(top) * int(topAlpha)
-	return uint8((bottomPart + topPart + 255) / 256)
+func paletteEntry(p string, i int) Color {
+	return NewColor(p[i*3], p[i*3+1], p[i*3+2])
 }
 
 const (

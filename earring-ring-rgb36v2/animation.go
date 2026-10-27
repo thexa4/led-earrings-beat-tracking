@@ -24,6 +24,7 @@ const (
 	modeCustom0
 	modeCustom1
 	modeSync
+	modeBasic
 	modeLast
 
 	modeTest
@@ -45,7 +46,8 @@ const variantsPerMode = "\x03" + // modeTrace
 	"\x0d" + // modeVUMeter (numStaticColors)
 	"\x00" + // modeCustom0: capped by the pattern itself
 	"\x00" + // modeCustom1: ditto
-	"\x04" + // modeSync: pulse, classic, custom slot 0, custom slot 1 (see syncAnimate)
+	"\x06" + // modeSync: pulse, classic, custom slot 0 and 1, interference, synthwave (see syncAnimate)
+	"\x05" + // modeBasic (numBasicPatterns)
 	"\x00" + // modeLast (not a mode)
 	"\x00" + // modeTest
 	"\x02" // modeQA
@@ -91,6 +93,8 @@ func animate(mode, variant, led, frame int) Color {
 		return showCustom(led, frame*millisPerFrame, 1)
 	case modeSync:
 		return syncAnimate(led, variant)
+	case modeBasic:
+		return basicPattern(led, frame*millisPerFrame, variant)
 	case modeTest:
 		return testPulse(led, frame)
 	case modePowerOn:
@@ -133,6 +137,8 @@ func newFrame(mode, variant, frame int) {
 		customNextFrame(frame*millisPerFrame, variant)
 	case modeSync:
 		syncNextFrame(variant)
+	case modeBasic:
+		basicNextFrame(variant, frame*millisPerFrame)
 	}
 }
 
@@ -166,8 +172,7 @@ func noise(led, frame, variant int) Color {
 	}
 	x := uint32(frame) << uint32(noiseSpeeds[variant])
 	y := uint32(led) << uint32(noiseSpreads[variant])
-	r, g, b := palette16At(noisePalettes[variant*48:(variant+1)*48], ledsgo.Perlin2(x, y)*2)
-	return NewColor(r, g, b)
+	return palette16At(noisePalettes[variant*48:(variant+1)*48], ledsgo.Perlin2(x, y)*2)
 }
 
 var traceIndex uint8
@@ -213,15 +218,9 @@ func twoTracers(led, frame, variant int) Color {
 	switch variant {
 	case 0:
 		// Rainbow trace.
-		var col color.RGBA
-		switch trace {
-		case 0:
-			// First tracer.
-			col = ledsgo.Color{H: uint16(frame * 128), S: 255, V: 255}.Rainbow()
-		default:
-			// Second tracer, offset 180° on the color wheel and on the actual LED ring.
-			col = ledsgo.Color{H: uint16(frame*128) + 0x8000, S: 255, V: 255}.Rainbow()
-		}
+		// The second tracer is offset 180° on the color wheel and on the
+		// actual LED ring.
+		col := ledsgo.Color{H: uint16(frame*128 + trace*0x8000), S: 255, V: 255}.Rainbow()
 		c = NewColor(
 			uint8(uint32(col.R)*(uint32(index)*7)/256),
 			uint8(uint32(col.G)*(uint32(index)*7)/256),
@@ -315,8 +314,7 @@ func fire(led, frame, variant int) Color {
 	// Turn it into a flame, based on the given palette.
 	// Perhaps we could use an actual 0-255 (or 0-64) palette instead? That
 	// might be faster.
-	c := coloredFlame(heat, fireColor(variant))
-	return NewColor(c.R, c.G, c.B)
+	return flame(heat, variant)
 }
 
 var volumeHistory [36]uint8
@@ -359,6 +357,13 @@ func fireSound(led, frame, variant int) Color {
 		heat -= uint8(cooling)
 	}
 
+	return flame(heat, variant)
+}
+
+// flame is the color of both fire animations at the given heat.
+//
+//go:noinline
+func flame(heat uint8, variant int) Color {
 	c := coloredFlame(heat, fireColor(variant))
 	return NewColor(c.R, c.G, c.B)
 }
