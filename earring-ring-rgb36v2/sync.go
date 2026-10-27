@@ -107,7 +107,7 @@ var (
 // The waves variant: a band rising above its own slow average spawns a wave
 // at the bar position, which runs both ways around the ring and fades.
 const (
-	syncWaveSlots = 4  // waves per band; a new one replaces the oldest
+	syncWaveSlots = 5  // per band: 4 for its own waves, a new one replacing the oldest, 1 for a shockwave
 	syncWaveLife  = 32 // frames a wave lasts (0.5 s), spreading half an LED per frame
 	syncWaveGap   = 8  // minimum frames between two waves of one band
 	syncWaveAvg   = 7  // the average's EMA shift: ~2 s at 64 frames/s
@@ -116,13 +116,15 @@ const (
 type syncWave struct {
 	birth       int32 // syncAnimFrame it spawned at
 	origin, amp uint8
+	style       uint8 // its shape (syncWaveShape): the section hash's low bits at its birth
+	per         uint8 // a shockwave's beat period in frames (see syncSpawnShock); 0 for a band's wave
 }
 
 type syncBand struct {
 	avg  int32 // the band's level, averaged, Q8 (an integer EMA at this shift sticks)
 	last int32 // syncAnimFrame of the band's last wave
 	up   bool  // the level was above avg last frame
-	next uint8 // slot of the band's next wave, 0..syncWaveSlots-1
+	next uint8 // slot of the band's next wave, 0..syncWaveSlots-2
 }
 
 // startSync resets the pipeline and starts DMA capture. Safe to call from any
@@ -315,7 +317,11 @@ func syncPoll() {
 	k := int(256 - phase)
 	syncBright = 56 + max(k*k>>8, int(sh.bass))*200>>8
 
-	// Waves variant: each band rising above its average spawns a wave.
+	// Waves variant: each band rising above its average spawns a wave, and a
+	// section change a shockwave.
+	if syncAnchorAge == 0 {
+		syncSpawnShock(uint8(min(per, 255)))
+	}
 	syncSpawnWave(0)
 	syncSpawnWave(1)
 	syncSpawnWave(2)
@@ -349,14 +355,49 @@ func syncSpawnWave(i int) {
 	b.avg += (x8 - b.avg) >> syncWaveAvg
 	if up && !b.up && uint(syncAnimFrame-int(b.last)) >= syncWaveGap {
 		b.last = int32(syncAnimFrame)
-		syncWaves[i*syncWaveSlots+int(b.next)] = syncWave{
-			birth:  b.last,
-			origin: uint8(((sh.beats&3)<<8 + uint32(sh.beatPhase)) * numLEDs >> 10),
-			amp:    x,
-		}
-		b.next = (b.next + 1) % syncWaveSlots
+		syncPutWave(i, x, 0)
 	}
 	b.up = up
+}
+
+// syncSpawnShock marks a section change in the waves variant, in place of the
+// white flash: a wave in the new section's shape and in yellow, cyan or
+// magenta (never white, nor one band's own color), as two bands' waves at
+// full amplitude, that runs around the ring for a whole bar. The colors and
+// the shape come from the section hash, so a section that comes back looks
+// the same as last time.
+//
+//go:noinline
+func syncSpawnShock(per uint8) {
+	mask := "\x03\x06\x05\x03"[syncShare.hash>>2&3] // bands: bit 0 bass (red), 1 mids (green), 2 highs (blue)
+	for i := range syncBands {
+		if mask>>i&1 != 0 {
+			syncPutWave(i, 255, per)
+		}
+	}
+}
+
+// syncPutWave puts a new wave of band i at the bar position: beat 1 at the top
+// (LED 0), a quarter turn clockwise per beat. The band's own waves take turns
+// in its first slots, a new one replacing the oldest; a shockwave has the last
+// to itself, so they don't cut it short.
+//
+//go:noinline
+func syncPutWave(i int, amp, per uint8) {
+	sh := syncShare
+	b := &syncBands[i]
+	j := syncWaveSlots - 1
+	if per == 0 {
+		j = int(b.next)
+		b.next = (b.next + 1) % (syncWaveSlots - 1)
+	}
+	syncWaves[i*syncWaveSlots+j] = syncWave{
+		birth:  int32(syncAnimFrame),
+		origin: uint8(((sh.beats&3)<<8 + uint32(sh.beatPhase)) * numLEDs >> 10),
+		amp:    amp,
+		style:  uint8(sh.hash & 3),
+		per:    per,
+	}
 }
 
 // syncDrawWaves draws the waves variant into syncWaveRing. The waves of a
@@ -367,39 +408,70 @@ func syncDrawWaves() {
 	syncWaveRing = [numLEDs]Color{}
 	ring := (*[numLEDs][4]uint8)(unsafe.Pointer(&syncWaveRing)) // red, green, blue
 	for i := range syncWaves {
+		w := &syncWaves[i]
+		// A band's wave: its fronts run at half an LED per frame from the
+		// origin both ways around the ring, fading out over syncWaveLife.
+		// A shockwave's meet on the far side a bar (4 beats) later, and it
+		// fades out over a bar and a half.
+		age := syncAnimFrame - int(w.birth)
+		front, fade := age, syncWaveLife-age
+		if per := uint32(w.per); per != 0 {
+			front = int(uint32(age) * numLEDs / 4 / per)
+			fade = syncWaveLife - front*19>>5 // 32 - age*16/(3*per): 19/32 for 16/27
+		}
+		if uint(fade-1) >= syncWaveLife {
+			continue // faded out (or not born yet)
+		}
+		k := int(w.amp) * fade
+		off, n := int("\x03\x06\x01\x01"[w.style&3]), uint("\x07\x0d\x0c\x16"[w.style&3])
 		for led := range numLEDs {
 			// A call in the loop: ARM's unroller leaves such loops alone.
-			p := &ring[led][i/syncWaveSlots]
-			*p = uint8(min(int(*p)+syncWaveLight(&syncWaves[i], led), 255))
+			d := led - int(w.origin)
+			if d < 0 {
+				d = -d
+			}
+			if d > numLEDs/2 {
+				d = numLEDs - d
+			}
+			p := front - 2*d // half LEDs behind the front (negative: ahead of it)
+			if uint(p+off) >= n {
+				continue // outside the shape's window (syncWaveShape): unlit
+			}
+			q := &ring[led][i/syncWaveSlots]
+			*q = uint8(min(int(*q)+k*syncWaveShape(w, p, led)>>7, 255))
 		}
 	}
 }
 
-// syncWaveLight is how much wave w lights LED led: its fronts are two LEDs
-// wide, at half an LED per frame from the origin both ways around the ring,
-// fading out over syncWaveLife.
+// syncWaveShape is how much wave w lights LED led, 0..4, p half LEDs behind
+// its front (negative: ahead of it). The section hash picks the shape (style),
+// and p is in its window, which syncDrawWaves keeps to:
+//
+//	0  sharp fronts, two LEDs wide: p from -3 to 3
+//	1  soft fronts, four LEDs wide: -6 to 6
+//	2  comets: each front trails a tail six LEDs long: -1 to 10
+//	3  sparkles: a trail twice as long, of which a quarter twinkles at a
+//	   time: -1 to 20
 //
 //go:noinline
-func syncWaveLight(w *syncWave, led int) int {
-	age := syncAnimFrame - int(w.birth)
-	if uint(age) >= syncWaveLife {
-		return 0
+func syncWaveShape(w *syncWave, p, led int) int {
+	if w.style < 2 {
+		s := uint(w.style)
+		if p < 0 {
+			p = -p
+		}
+		return max(4<<s-p, 0) >> s
 	}
-	d := led - int(w.origin)
-	if d < 0 {
-		d = -d
+	s := uint(w.style & 1)
+	if s != 0 && p >= 2 {
+		// A different quarter every 4 frames: 16 ms reads as flicker rather
+		// than a twinkle.
+		x := (uint32(led)*0x9e3779b1 ^ uint32(syncAnimFrame>>2)) * 0x85ebca6b
+		if x>>30 != 0 {
+			return 0
+		}
 	}
-	if d > numLEDs/2 {
-		d = numLEDs - d
-	}
-	e := 2*d - age // distance from the front, in half LEDs
-	if e < 0 {
-		e = -e
-	}
-	if e >= 4 {
-		return 0
-	}
-	return int(w.amp) * (syncWaveLife - age) * (4 - e) >> 7
+	return min((12<<s-p)>>(s+1), 4)
 }
 
 var _ [numNoisePatterns - syncdsp.NumPatterns]struct{} // every pattern has a palette
@@ -416,7 +488,9 @@ var _ [numNoisePatterns - syncdsp.NumPatterns]struct{} // every pattern has a pa
 //
 //	0  waves: red, green and blue waves for the bass, mids and highs, each
 //	   spawned by its band rising above its average, at a point going
-//	   around the ring once per bar (syncDrawWaves)
+//	   around the ring once per bar, in a shape each section picks; a
+//	   section change sends a shockwave instead of the white flash
+//	   (syncDrawWaves, syncSpawnShock)
 //	1  pulse: the music-chosen palette, brightness on the beat and the bass,
 //	   flow speed from the mids, glitter from the highs
 //	2  classic: the music-chosen palette with a flash on each beat
@@ -473,9 +547,10 @@ func syncAnimate(led, variant int) Color {
 		c = syncPattern(led, variant)
 	}
 
-	if syncAnchorAge <= 1 {
+	if syncAnchorAge <= 1 && variant != 0 {
 		// Transition anchor: a white flash. This is the moment the earrings
-		// are meant to snap together, so make it obvious.
+		// are meant to snap together, so make it obvious. (Waves marks it
+		// with a shockwave instead, see syncSpawnShock.)
 		c = NewColor(255, 255, 255)
 	}
 

@@ -21,7 +21,7 @@ pattern in the normal web editor; nothing about uploading changes.
 
    | variant | what it shows |
    |---|---|
-   | 1 | **waves** (the default): red, green and blue waves for the lows, mids and highs. A band starts a wave each time it gets louder than its own average, at a point that goes once round the ring per bar, and the wave runs both ways round the ring from there |
+   | 1 | **waves** (the default): red, green and blue waves for the lows, mids and highs. A band starts a wave each time it gets louder than its own average, at a point that goes once round the ring per bar, and the wave runs both ways round the ring from there. Each new part of the song (a drop, a breakdown) picks the waves' shape - sharp, soft, comets or sparkles - and starts with a big yellow, cyan or magenta wave that takes a bar to go round the ring |
    | 2 | **pulse**: the music's color scheme, flashing on the beat, brighter with the bass, flowing faster with the mids, with glitter on the highs |
    | 3 | **classic**: the music's color scheme with a short flash on every beat |
    | 4 | **your pattern** from the first custom mode, with the music data |

@@ -590,6 +590,17 @@ Measured 2026-10-27 on scream-rx (re-measure):
   import it and set `synccpu.PORTS` to the other only. A 1530 B program (patternc's
   largest under the 1532 B limit) written into slot 2 over SWD loads in custom 2, as
   sync variant 5 and after a reboot.
+- **Waves' draw cost follows its live waves** since the section shapes and the
+  shockwave: `syncDrawWaves` skips faded waves, and LEDs outside a wave's shape
+  before the shape call, so a quiet room runs faster than before and a busy ring
+  slower. L, back to back with b4d64fe (`passrate.py`): waves 4902 against 3920
+  passes/s with the room quiet, pulse 2390 against 2373, trace, fire and VU meter
+  equal; `synccpu.py --builtin` 2403 against 2390 passes/s, 63.9 frames/s. With all
+  15 slots holding a live shockwave (`per` 255, the bands' averages pinned so none
+  is replaced): 3964 sharp, 3679 comets, 3405 sparkles passes/s, 64 frames/s;
+  calling the shape for all 36 LEDs it was 2730-2390. Music fills about 4 slots at
+  a time (2 recordings of the podcast: mean 4.2, max 9), plus 2 for a bar and a
+  half after a section change.
 - **What both microphones heard, frame by frame** (`tools/syncbands.py record`,
   `-tags syncboot`, `--elf` the image on the earrings): ~100 reads/s of the
   pipeline's band energies and comb state per earring, enough for every 64/s frame
