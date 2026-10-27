@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+	<head>
+		<meta charset="utf-8">
+		<title>LED animation editor</title>
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<link rel="stylesheet" href="resources/bootstrap-5.3.8-dist/css/bootstrap.min.css"/>
+		<link rel="stylesheet" href="front.css"/>
+		<script type="module" src="front.js"></script>
+		<script src="resources/bootstrap-5.3.8-dist/js/bootstrap.bundle.min.js"></script>
+	</head>
+	<body>
+		<div id="middle">
+			<div id="column-projects" class="d-flex flex-column">
+				<div>
+					<button id="btn-device" type="button" class="btn btn-primary btn-lg dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false">Device </button>
+					<ul class="dropdown-menu">
+						<li><a class="dropdown-item active" href="#" id="dropdown-device-ble">BLE connect</a></li>
+						<li><a class="dropdown-item" href="#" id="dropdown-device-earringring36">36-LED earring</a></li>
+					</ul>
+					<button type="button" class="btn" id="connect-button">Connect</button>
+					<div id="connect-status">Not connected</div>
+				</div>
+				<div id="brightness-slider">
+					<label for="brightness" class="form-label">Brightness: <output for="brightness" id="brightnessValue" aria-hidden="true">0</output></label>
+					<input type="range" class="form-range" min="1" max="32" value="0" id="brightness" disabled>
+				</div>
+				<hr/>
+				<ul class="nav nav-pills flex-column" id="project-list"></ul>
+				<button class="btn btn-secondary mt-2" type="button" id="new-project-button" data-bs-toggle="modal" data-bs-target="#new-project-modal">New project</button>
+				<hr/>
+				<ul class="nav nav-pills flex-column">
+					<div class="btn-group">
+						<a class="btn text-start" href="#example/static">Example: static color</a>
+					</div>
+					<div class="btn-group">
+						<a class="btn text-start" href="#example/flag">Example: flag</a>
+					</div>
+					<div class="btn-group">
+						<a class="btn text-start" href="#example/rotate">Example: rotate</a>
+					</div>
+					<div class="btn-group">
+						<a class="btn text-start" href="#example/noise">Example: Perlin noise</a>
+					</div>
+				</ul>
+			</div>
+			<div id="editor-frame">
+				<ul class="nav nav-tabs">
+					<li class="nav-item">
+						<a class="nav-link active" aria-current="page" id="editor-filename">&nbsp;</a>
+					</li>
+					<div class="dropdown ms-auto">
+						<span id="editor-shape"></span>
+						<button class="btn btn-primary d-none" id="btn-edit">Edit</button>
+						<button class="btn btn-secondary" id="btn-share">Share</button>
+						<button class="btn btn-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+							⚙
+						</button>
+						<div class="dropdown-menu dropdown-menu-end">
+							<form class="px-4 py-3">
+								<div class="mb-3 form-check">
+									<input type="checkbox" class="form-check-input" id="enable-vim">
+									<label class="form-check-label" for="enable-vim">Vim mode</label>
+								</div>
+							</form>
+						</div>
+					</div>
+				</ul>
+				<div id="editor" tabindex="-1"></div>
+			</div>
+			<div id="output">
+				<div id="output-svg-wrapper">
+					<svg id="output-svg"></svg>
+				</div>
+				<div class="d-flex align-items-center mb-2">
+					<div>Program size: <span id="program-size">…</span></div>
+					<div class="ms-auto">
+						<button class="btn btn-secondary d-none" id="btn-scream" disabled title="Send this program over audio">📢 Scream</button>
+						<button class="btn btn-secondary" id="upload" disabled>Upload</button>
+					</div>
+				</div>
+				<div id="program-size-info">
+					<div id="program-size-chart"></div>
+					<div class="size-example" style="background: var(--size-header)"></div> header,
+					<div class="size-example" style="background: var(--size-program)"></div> program,
+					<div class="size-example" style="background: var(--size-free)"></div> remaining space
+				</div>
+				
+				<div id="simulator-output" class="d-none">⚠ <span class="message"></span></div>
+				
+				<div id="compiler-output"></div>
+			</div>
+		</div>
+		
+		<div class="modal fade" id="new-project-modal" tabindex="-1" aria-labelledby="newProjectModalLabel" aria-hidden="true">
+			<div class="modal-dialog">
+				<div class="modal-content">
+					<div class="modal-header">
+						<h1 class="modal-title fs-5" id="newProjectModalLabel">New project</h1>
+						<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+					</div>
+					<div class="modal-body">
+						<form id="new-project-form">
+							<div class="form-group">
+								<label for="new-project-name">Name</label>
+								<input type="text" class="form-control" id="new-project-name" required>
+							</div>
+							<div class="form-group">
+								<label for="new-project-language">Language</label>
+								<div>
+									<div class="btn-group" role="group">
+										<input type="radio" class="btn-check" name="radio-lang" id="radio-lang-fastled" value="fastled" autocomplete="off" checked>
+										<label class="btn btn-outline-primary" for="radio-lang-fastled">FastLED (C++)</label>
+										
+										<input type="radio" class="btn-check" name="radio-lang" id="radio-lang-c" value="c" autocomplete="off">
+										<label class="btn btn-outline-primary" for="radio-lang-c">C</label>
+										
+										<input type="radio" class="btn-check" name="radio-lang" id="radio-lang-rust" value="rust" autocomplete="off">
+										<label class="btn btn-outline-primary" for="radio-lang-rust">Rust</label>
+									</div>
+								</div>
+							</div>
+							<div class="form-group">
+								<label for="new-project-language">Shape</label>
+								<div>
+									<div class="btn-group" role="group">
+										<input type="radio" class="btn-check" name="radio-shape" id="radio-shape-circle" value="circle" autocomplete="off" checked>
+										<label class="btn btn-outline-primary" for="radio-shape-circle">Circle</label>
+										
+										<input type="radio" class="btn-check" name="radio-shape" id="radio-shape-matrix" value="matrix" autocomplete="off">
+										<label class="btn btn-outline-primary" for="radio-shape-matrix">Matrix</label>
+									</div>
+								</div>
+							</div>
+						</form>
+						
+						<!-- TODO: show what the code is going to look like -->
+					</div>
+					<div class="modal-footer">
+						<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+						<button type="submit" class="btn btn-primary" form="new-project-form" id="new-project-create">Create</button>
+					</div>
+				</div>
+			</div>
+		</div>	
+		
+		<div class="modal modal-lg fade" id="shareModal" tabindex="-1" aria-labelledby="shareModalLabel" aria-hidden="true">
+			<div class="modal-dialog">
+				<div class="modal-content">
+					<div class="modal-header">
+						<h1 class="modal-title fs-5" id="shareModalLabel">Share</h1>
+						<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+					</div>
+					<div class="modal-body">
+						<div class="input-group">
+							<input type="text" class="form-control user-select-all" placeholder="Loading..." readonly/>
+							<button class="btn btn-outline-secondary copy-to-clipboard" type="button" data-bs-toggle="tooltip" data-bs-title="Copy to clipboard" data-bs-placement="bottom" disabled>🗐</button>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</body>
+</html>

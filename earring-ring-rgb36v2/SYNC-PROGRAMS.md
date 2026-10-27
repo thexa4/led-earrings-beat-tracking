@@ -200,10 +200,10 @@ on the earrings:
 | one `nextFrame` call | fine at 60 000 cycles (4 ms); 185 000 lost 8% of the music | 60 000 cycles |
 | one division or `%` | a few hundred cycles each | |
 
-That is a lot of room for normal code: the three examples in
-`examples/sync/` take 60-100 cycles per `getPixel` and 5-8% of the
-processor. A loop that runs a few hundred times per pixel, or more than about
-five divisions per pixel, is where it starts to go wrong. A program that
+That is a lot of room for normal code: the pulse, spectrum and hashview
+examples take 60-100 cycles per `getPixel` and 5-8% of the processor. A
+loop that runs a few hundred times per pixel, or more than about five
+divisions per pixel, is where it starts to go wrong. A program that
 went over the limit with 16 divisions per pixel made the earring lose a third
 of the music.
 
@@ -215,6 +215,29 @@ of the music.
   Write `x * 455 >> 10` instead of `x * 16 / 36`, and `x & 3` instead of
   `x % 4`.
 - There is no floating point hardware either: use integers.
+
+## Trying it in the editor's preview
+
+The editor's preview has no music, so a sync pattern only shows its
+fallback there. [`../editor/sync-sim.js`](../editor/sync-sim.js) fills in
+the sync data in the preview with a made-up track, so you can see the sync
+part before uploading:
+
+1. Open your pattern in the editor.
+2. Open the browser console (F12), paste the whole file and press Enter.
+   Chrome asks you to type `allow pasting` first.
+
+The preview then runs your pattern the way sync mode does: `millis` counts
+from the start in steps of 15.625 ms and `nextFrame` runs 32 times a second.
+A panel sets the tempo, the bars per section and the color scheme, and
+switches the tempo lock, silence and the red/blue swap. Every loudness has a
+slider that holds it at a value. Switch off *Active* to see the pattern as
+it runs in a custom pattern mode.
+
+The track has a kick on every beat and hi-hats between the beats, and every
+other section is a breakdown without the kick. It is not the earring
+listening to real music, and the preview doesn't check the cycle budget
+(see [Keep it fast](#keep-it-fast)).
 
 ## More examples
 
@@ -230,6 +253,27 @@ into the editor.
   fingerprint as a color, and a blinking dot goes round once every four
   beats. Earrings that agree change color at the same moment and have dots
   moving at the same speed. This used to be built into sync mode.
+- [`heartbeat.c`](examples/sync/heartbeat.c): the whole ring breathes
+  with the bass plus a flash on every beat, the palette turns with the
+  mids and the highs add white sparkles. Keeps moving with music that has
+  no clear kick.
+- [`ripples.c`](examples/sync/ripples.c): every beat starts a wavefront
+  that runs both ways round the ring from a different LED and meets itself
+  on the far side just as the next beat comes.
+- [`sparks.c`](examples/sync/sparks.c): when the hi-hats hit, 3 to 5
+  random LEDs flash white and fade. All the work is in `nextFrame`.
+- [`carousel.c`](examples/sync/carousel.c): the 16 palette colors turning
+  round the ring, faster with the mids, and the other way after every
+  section change.
+- [`mosaic.c`](examples/sync/mosaic.c): six tiles whose colors come from
+  the section's `hash`, so the ring stays fixed for a whole section and
+  changes all at once. Two earrings show the same mosaic.
+- [`drop.c`](examples/sync/drop.c): a white flash on every section change,
+  then a wavefront that reveals the new palette, which slowly drains
+  towards grey until the next section.
+- [`history.c`](examples/sync/history.c): one LED per section, pushed in
+  at the top, so after a while the ring is a map of the last 36 sections.
+  An example of keeping state in a global array.
 
 ### FastLED (C++)
 
