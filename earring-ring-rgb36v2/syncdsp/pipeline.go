@@ -164,6 +164,16 @@ type Pipeline struct {
 	spFill                       int32
 	spCount                      int32
 
+	// Display levels (see LevelRangeQ8): the reference peak per band plus
+	// one for the whole spectrum, and the levels themselves - Level[i] for
+	// band i (0 = top band, above 4 kHz; NBands-1 = below 250 Hz) and
+	// Level[NBands] for the overall loudness. Written every frame; 0 while
+	// silent.
+	lvlPeak [NBands + 1]int32
+	lvlTop  int32 // the highest of lvlPeak, last frame
+	lvlN    int8  // NBands+1, see levels
+	Level   [NBands + 1]uint8
+
 	frame  int32
 	events Events
 }
@@ -177,6 +187,7 @@ func (p *Pipeline) Init() {
 	// first drop without pumping. See agcUpdate.
 	p.agcShift = AgcMaxShift
 	p.filters.gainShift = p.agcShift
+	p.lvlN = NBands + 1
 }
 
 // Process runs one analysis frame of Window samples. It needs no scratch
@@ -453,6 +464,8 @@ func (p *Pipeline) endFrame() Events {
 	}
 	p.silent = linear < p.linPeak/SilenceDiv
 
+	p.levels(&e, log2e(uint32(linear)))
+
 	total := maxE
 	if !p.silent {
 		for i := range e {
@@ -685,6 +698,36 @@ func (p *Pipeline) endFrame() Events {
 
 	p.frame++
 	return p.events
+}
+
+// levels updates the display levels from this frame's log2 band energies e
+// and the log2 of their sum. See LevelRangeQ8; nothing else reads them.
+//
+// One loop, and its trip count is a field: with the constant NBands+1 the
+// firmware build (-opt=2) unrolls it, and the two loops this used to be cost
+// 744 B of flash. The noise floor comes from the previous frame's top peak for
+// the same reason, which a frame late (16 ms) does not change visibly.
+//
+//go:noinline
+func (p *Pipeline) levels(e *[NBands]int32, all int32) {
+	floor := p.lvlTop - RelFloorQ8
+	top := int32(-1 << 30)
+	for i := range p.lvlN {
+		v := all
+		if i < NBands {
+			v = e[i]
+		}
+		pk := max(p.lvlPeak[i]-LevelPeakDecayQ8, v)
+		p.lvlPeak[i] = pk
+		top = max(top, pk)
+		x := (v - max(pk, floor) + LevelRangeQ8) >> LevelShift
+		x = min(max(x, int32(p.Level[i])-LevelRelease), 255)
+		if x < 0 || p.silent {
+			x = 0
+		}
+		p.Level[i] = uint8(x)
+	}
+	p.lvlTop = top
 }
 
 // pushEnv stores this frame's loudness in the tempo ring, relative to the

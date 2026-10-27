@@ -79,11 +79,14 @@ var (
 	syncLocked    bool
 	syncSilent    bool
 
-	// State for the hash-view variant (sync variant 1), updated in syncPoll
-	// once per analysis frame and read per LED by syncHashAnimate.
-	syncHashCol   Color  // solid section color: hash at the last anchor
-	syncBeatCount int32  // beats since startSync, for the marker position
-	syncDotQ8     uint32 // marker position, 1/256 LED units, wraps at 36
+	// State for the pulse variant (sync variant 0), updated in syncPoll once
+	// per analysis frame and read per LED by syncAnimate.
+	syncNoiseT int // noise time: advances faster the louder the mids
+	syncBright int // 0..256: the beat's decay or the bass level, whichever is up
+
+	// Uploaded programs in sync mode (variants 2 and 3, see syncNextFrame).
+	syncSlot        int // custom slot loaded into animationBuf, plus one (0: none)
+	syncCustomFrame int // syncAnimFrame/2 at the program's last nextFrame
 
 	syncRunning bool  // capture is up (also: stopSync is idempotent)
 	syncRead    int   // next sample to consume from adcData
@@ -102,9 +105,9 @@ func startSync() {
 	syncAnchorAge = 100
 	syncLocked = false
 	syncSilent = false
-	syncHashCol = 0
-	syncBeatCount = 0
-	syncDotQ8 = 0
+	syncNoiseT = 0
+	syncSlot = 0
+	syncShareReset(syncShareActive)
 	syncRead = 0
 	syncFed = 0
 	syncRunning = true
@@ -154,6 +157,7 @@ func stopSync() {
 		return
 	}
 	syncRunning = false
+	syncShare.flags = 0
 
 	stopCapture()
 
@@ -204,19 +208,15 @@ func syncPoll() {
 	syncAnimFrame++
 	syncBeatAge++
 	syncAnchorAge++
+	sh := syncShare
 	if ev.Beat {
 		syncBeatAge = 0
+		sh.beats++
 	}
 	if ev.Anchor {
 		syncAnchorAge = 0
-		// The hash-view variant shows the section's hash as a solid color,
-		// changed here at the anchor - the moment the section (and therefore
-		// the color) is decided. Held until the next anchor, so two earrings
-		// hearing the same music display the same color for the same section.
-		syncHashCol = hashColor(ev.Hash)
-	}
-	if ev.Beat {
-		syncBeatCount++
+		sh.sections++
+		sh.hash = ev.Hash
 	}
 	if ev.PatternChanged {
 		// Map pattern -> palette here rather than per LED in syncAnimate:
@@ -226,20 +226,50 @@ func syncPoll() {
 	syncLocked = ev.Locked
 	syncSilent = ev.Silent
 
-	// Beat marker position for the hash view: the dot travels a quarter of the
-	// ring (9 of 36 LEDs) per beat, smooth between beats by interpolating the
+	// Beat phase, 0..256 through the current beat, interpolated with the
 	// tracker's own period. One division per frame on a machine that does 64
 	// frames/s with ~2k cycles of boundary work - noise.
 	per := syncPipe.BeatPeriod()
 	if per < 1 {
-		per = 26 // before the first lock: keep the position well-defined
+		per = 26 // before the first lock: keep the phase well-defined
 	}
-	age := syncBeatAge
-	if age > per {
-		age = per
+	age := min(syncBeatAge, per)
+	phase := 256 * uint32(age) / uint32(per)
+
+	// The sync data block for uploaded programs (syncshare.go). Levels are
+	// stored band 0 = top in the pipeline, lowest first in the block.
+	lv := &syncPipe.Level
+	for i := range sh.bands {
+		sh.bands[i] = lv[len(sh.bands)-1-i]
 	}
-	syncDotQ8 = (uint32(syncBeatCount)*9<<8 +
-		(9<<8)*uint32(age)/uint32(per)) % (36 << 8)
+	sh.level = lv[syncdsp.NBands]
+	sh.bass = lv[7]
+	sh.mid = uint8((uint32(lv[4]) + uint32(lv[5]) + uint32(lv[6])) * 85 >> 8)
+	sh.high = uint8((uint32(lv[0]) + uint32(lv[1]) + uint32(lv[2])) * 85 >> 8)
+	sh.frame = uint32(syncAnimFrame)
+	sh.beatPhase = uint8(min(phase, 255))
+	sh.beatAge = uint8(min(syncBeatAge, 255))
+	sh.sectionAge = uint8(min(syncAnchorAge, 255))
+	sh.pattern = uint8(syncVariant)
+	sh.palette = uintptr(unsafe.Pointer(unsafe.StringData(noisePalettes))) + uintptr(syncVariant*48)
+	flags := uint8(syncShareActive)
+	sh.beatMs = 0
+	if syncLocked {
+		flags |= syncShareLocked
+		sh.beatMs = uint16(per * 125 / 8) // 64 frames/s: 15.625 ms per frame
+	}
+	if syncSilent {
+		flags |= syncShareSilent
+	}
+	sh.flags = flags
+
+	// Pulse variant: the palette flows faster with the mids, and the ring's
+	// brightness follows the beat (a squared decay: a snap on the beat, dark
+	// well before the next) or the bass level, whichever is higher, so music
+	// without a steady kick still breathes.
+	syncNoiseT += 1 + int(sh.mid>>6)
+	k := int(256 - phase)
+	syncBright = 56 + max(k*k>>8, int(sh.bass))*200>>8
 }
 
 // syncAnimate draws one LED for party sync mode.
@@ -250,32 +280,56 @@ func syncPoll() {
 // a good animation rate and the rate every other earring is animating at, so
 // the same pattern on two earrings is frame-locked as well as music-locked.
 //
-// Variant 1 is not an animation but an instrument: see syncHashAnimate.
+// Variants:
+//
+//	0  pulse: the music-chosen palette, brightness on the beat and the bass,
+//	   flow speed from the mids, glitter from the highs
+//	1  classic: the music-chosen palette with a flash on each beat
+//	2  the uploaded program in custom slot 0, with the sync data block live
+//	3  the same for slot 1
+//
+// Until flash ran out there was also a hash readout, an instrument for
+// checking earrings against each other (section hash as a color, a dot
+// chasing the beat); it is an uploadable program now, in SYNC-PROGRAMS.md.
 func syncAnimate(led, variant int) Color {
-	if variant == 1 {
-		return syncHashAnimate(led)
+	if variant >= 2 {
+		return showCustom(led, syncMillis(), variant-2)
 	}
 
 	// The pipeline picks one of NumPatterns patterns from the spectrum (a
 	// pure function, identical on every device); the noise palettes give
 	// them visibly different looks.
-	c := noise(led, syncAnimFrame, syncVariant)
+	var c Color
+	if variant == 0 {
+		c = noise(led, syncNoiseT, syncVariant).Scale(syncBright)
 
-	switch {
-	case !syncLocked:
-		// Still finding the tempo: dim, so a pair of earrings visibly
-		// settles when both lock.
-		c = c.Scale(80)
-	case syncAnchorAge <= 1:
-		// Transition anchor: a white flash. This is the moment the
-		// earrings are meant to snap together, so make it obvious.
+		// Glitter: up to 1 in 8 LEDs, more the louder the highs, each held
+		// for two frames (one frame, 16 ms, reads as flicker rather than as a
+		// spark). Not synchronized between earrings, and need not be.
+		x := (uint32(led)*0x9e3779b1 ^ uint32(syncAnimFrame>>1)) * 0x85ebca6b
+		if h := syncShare.high; uint8(x>>24) < h>>3 {
+			c = NewColor(h, h, h)
+		}
+	} else {
+		c = noise(led, syncAnimFrame, syncVariant)
+		switch {
+		case !syncLocked:
+			// Still finding the tempo: dim, so a pair of earrings visibly
+			// settles when both lock.
+			c = c.Scale(80)
+		case syncBeatAge == 0:
+			// Beat: flash toward white for one analysis frame (~16 ms).
+			c = NewColor(
+				uint8(int(c.R())+(255-int(c.R()))/2),
+				uint8(int(c.G())+(255-int(c.G()))/2),
+				uint8(int(c.B())+(255-int(c.B()))/2))
+		}
+	}
+
+	if syncAnchorAge <= 1 {
+		// Transition anchor: a white flash. This is the moment the earrings
+		// are meant to snap together, so make it obvious.
 		c = NewColor(255, 255, 255)
-	case syncBeatAge == 0:
-		// Beat: flash toward white for one analysis frame (~60 ms).
-		c = NewColor(
-			uint8(int(c.R())+(255-int(c.R()))/2),
-			uint8(int(c.G())+(255-int(c.G()))/2),
-			uint8(int(c.B())+(255-int(c.B()))/2))
 	}
 
 	if syncSilent {
@@ -287,97 +341,41 @@ func syncAnimate(led, variant int) Color {
 	return c
 }
 
-// syncHashAnimate is sync mode's second variant: a readout of what the
-// pipeline knows, for verifying several earrings in a room against each other
-// (and against the music) at a glance.
-//
-//   - The whole ring shows one solid color, the current section's hash mapped
-//     to hue. It changes at anchors - the moments an earring decides the music
-//     moved to a new section - so two earrings in the room snap to the same
-//     color at the same instant if they agree, and a color that never changes
-//     (or changes at different times) reads immediately as no anchor / wrong
-//     anchor.
-//   - A single dot travels a quarter of the ring per beat - one lap per bar -
-//     and blinks black/white at ~11 Hz (every 3 of the 64 analysis frames:
-//     fast enough to read as a strobe, slow enough to stay distinct on video).
-//     Two earrings whose dots chase at the same tempo are locked to the same
-//     beat period; the dot position within the lap shows the bar phase.
-//   - Unlocked: the ring stays dark apart from a dim base, so lock status is
-//     readable from the color appearing at all.
-//
-// All the state (syncHashCol, syncDotQ8) is computed once per frame in
-// syncPoll; this runs per LED.
-func syncHashAnimate(led int) Color {
-	if syncSilent {
-		return Color(0)
-	}
-	if !syncLocked {
-		// Finding the tempo: dim uniform glow, no color, no dot.
-		return NewColor(24, 24, 24)
-	}
-	c := syncHashCol
-	if syncAnchorAge <= 1 {
-		// The anchor frame itself: one white frame so the snap is obvious.
-		return NewColor(255, 255, 255)
-	}
-
-	// Dot at syncDotQ8>>8, blended into its neighbour by the fraction, so it
-	// slides instead of jumping (9 LEDs per beat at 64 fps is a third of an
-	// LED per frame - unblended that would look like a strobe, not a sweep).
-	p0 := int(syncDotQ8 >> 8)
-	frac := uint32(syncDotQ8 & 0xff)
-	w := uint32(0)
-	switch (led - p0 + 36) % 36 {
-	case 0:
-		w = 256 - frac
-	case 1:
-		w = frac
-	}
-	if w > 0 {
-		// Blink ~11 Hz: dot alternates white and off (black), so its
-		// position reads even against a light-colored background.
-		var tr, tg, tb uint32
-		if (syncAnimFrame/3)%2 == 0 {
-			tr, tg, tb = 255, 255, 255
-		}
-		return NewColor(
-			uint8((uint32(c.R())*(256-w)+tr*w)>>8),
-			uint8((uint32(c.G())*(256-w)+tg*w)>>8),
-			uint8((uint32(c.B())*(256-w)+tb*w)>>8))
-	}
-	return c
+// syncMillis is the time base handed to uploaded programs in sync mode:
+// analysis frames (exactly 15.625 ms at 16 kSPS) since sync started.
+func syncMillis() int {
+	return syncAnimFrame * 125 >> 3
 }
 
-// hashColor maps a section hash to a solid color: hue from the hash bits,
-// full saturation and value so every section is a distinct primary. The 29
-// hash bits are folded so all three fields (temporal, shape, hot) influence
-// the hue - the point is to *see* the hash, and two hashes differing in any
-// field should not look the same.
-func hashColor(h uint32) Color {
-	x := h ^ (h >> 9) ^ (h >> 18)
-	return hsvToRGB(uint8(x), 255, 255)
+// syncNextFrame runs once per main-loop frame in sync mode. For variants 2
+// and 3 it loads the uploaded program from that custom slot (on entering the
+// variant, with the same one-second grace as the custom modes) and calls its
+// nextFrame every other analysis frame: 32 times a second, near the ~27 of
+// the custom modes, so programs that count frames run at about their usual
+// speed. The program runs with the variant it last had in its custom mode.
+func syncNextFrame(variant int) {
+	slot := variant - 2
+	if slot < 0 || slot > 1 {
+		return
+	}
+	if syncSlot != slot+1 {
+		syncSlot = slot + 1
+		customLoadPattern(slot, true)
+	}
+	if f := syncAnimFrame >> 1; f != syncCustomFrame {
+		syncCustomFrame = f
+		customNextFrame(syncMillis(), int(modeVariants[modeCustom0+slot]))
+	}
 }
 
-// hsvToRGB: 8-bit hue wheel (0=red, 85=green, 170=blue), classic 6-sector
-// conversion, integer only (this runs on a Cortex-M0+ with no FPU).
-func hsvToRGB(h, s, v uint8) Color {
-	region := uint16(h) * 6 >> 8
-	f := uint16(h) * 6 & 0xff
-	p := uint16(v) * (255 - uint16(s)) >> 8
-	q := uint16(v) * (255 - uint16(s)*f>>8) >> 8
-	t := uint16(v) * (255 - uint16(s)*(255-f)>>8) >> 8
-	switch region {
-	case 0:
-		return NewColor(v, uint8(t), uint8(p))
-	case 1:
-		return NewColor(uint8(q), v, uint8(p))
-	case 2:
-		return NewColor(uint8(p), v, uint8(t))
-	case 3:
-		return NewColor(uint8(p), uint8(q), v)
-	case 4:
-		return NewColor(uint8(t), uint8(p), v)
-	default:
-		return NewColor(v, uint8(p), uint8(q))
+// syncShareReset clears the sync data block and sets its header; flags is
+// syncShareActive from startSync, 0 at boot.
+//
+//go:noinline
+func syncShareReset(flags uint8) {
+	*syncShare = syncShareT{
+		magic:   syncShareMagic,
+		version: syncShareVersion,
+		flags:   flags,
 	}
 }

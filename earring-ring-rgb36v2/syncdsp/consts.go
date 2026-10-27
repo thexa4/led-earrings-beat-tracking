@@ -459,3 +459,34 @@ const (
 	// BeatRefractoryFrames: minimum spacing between onsets (~125 ms).
 	BeatRefractoryFrames = 15
 )
+
+// Display levels (Pipeline.Level): per-band loudness scaled to 0..255 for the
+// animations and for uploaded programs (see SYNC-PROGRAMS.md). Nothing the
+// pipeline decides reads them, so they can be retuned for looks without
+// touching agreement between earrings.
+//
+// Each band is shown against its own decaying peak, so a band that is quiet in
+// absolute terms (the top band, almost always) still moves over the full
+// range, and two earrings with different microphone gains show nearly the
+// same levels. A band whose peak sits more than RelFloorQ8 below the loudest
+// band's is measured against that floor instead, so noise in an empty band is
+// not stretched to full scale.
+const (
+	// LevelRangeQ8 is the window below the peak that maps onto 0..255 (Q8
+	// log2: 512 = 12 dB). LevelShift turns that window into 0..256. Measured
+	// on a room recording (hears-left.wav, TestLevelsWav): 24 dB left every
+	// band at a median of ~215 with a p10 of ~140, flat-looking for mastered
+	// music; 12 dB gives p10 0-45, median ~170, p90 ~240.
+	LevelRangeQ8 = 512
+	LevelShift   = 1
+
+	// LevelPeakDecayQ8 is how fast the reference peak falls per frame: 3/256
+	// of a log2 unit is 4.5 dB/s, so after a drop into a quiet breakdown the
+	// levels come back up within a few seconds.
+	LevelPeakDecayQ8 = 3
+
+	// LevelRelease is how fast a displayed level may fall per frame (it rises
+	// at once): 255 to 0 in 0.1 s, fast enough to fall between kicks, slow
+	// enough to hide the frame-to-frame flicker of a 15.6 ms window.
+	LevelRelease = 40
+)

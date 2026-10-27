@@ -1,5 +1,7 @@
 package main
 
+import "runtime/volatile"
+
 // State: current mode, current variant, previous variants, 4 hash bytes
 //
 //go:align 4 // flashWrite reinterprets this as words
@@ -16,10 +18,11 @@ var modeVariants = storedState[stateOffsetVariants : stateOffsetVariants+modeLas
 
 func main() {
 	initHardware()
-	screamDump()  // -tags screamdump only: never returns
-	screamFeed()  // -tags screamfeed only: never returns
-	screamTelem() // -tags screamtelem only: never returns
-	syncBoot()    // -tags syncboot only: start in sync mode
+	screamDump()      // -tags screamdump only: never returns
+	screamFeed()      // -tags screamfeed only: never returns
+	screamTelem()     // -tags screamtelem only: never returns
+	syncBoot()        // -tags syncboot only: start in sync mode
+	syncShareReset(0) // the sync data block reads "not running" until sync starts
 
 	// Zero all LEDs.
 	clearLEDs()
@@ -182,10 +185,14 @@ func main() {
 //
 //go:noinline
 func clearLEDs() {
-	for i := 0; i < 12; i++ {
+	// The bound goes through a volatile read: -opt=2 unrolls any loop with a
+	// constant trip count into twelve calls (150 B).
+	for i := range int(volatile.LoadUint8(&ledGroups)) {
 		setLEDs(i, 0, 0, 0)
 	}
 }
+
+var ledGroups uint8 = numLEDs / 3 // see clearLEDs
 
 // startModeAudio starts whatever audio input mode needs: the sync pipeline or
 // the microphone (or nothing).

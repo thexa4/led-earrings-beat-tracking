@@ -45,7 +45,7 @@ const variantsPerMode = "\x03" + // modeTrace
 	"\x0d" + // modeVUMeter (numStaticColors)
 	"\x00" + // modeCustom0: capped by the pattern itself
 	"\x00" + // modeCustom1: ditto
-	"\x02" + // modeSync: variant 0 = music-chosen pattern, variant 1 = hash readout
+	"\x04" + // modeSync: pulse, classic, custom slot 0, custom slot 1 (see syncAnimate)
 	"\x00" + // modeLast (not a mode)
 	"\x00" + // modeTest
 	"\x02" // modeQA
@@ -86,9 +86,9 @@ func animate(mode, variant, led, frame int) Color {
 	case modeSparkle:
 		return makeSparkle(led, frame, variant)
 	case modeCustom0:
-		return showCustom(led, frame, variant, 0)
+		return showCustom(led, frame*millisPerFrame, 0)
 	case modeCustom1:
-		return showCustom(led, frame, variant, 1)
+		return showCustom(led, frame*millisPerFrame, 1)
 	case modeSync:
 		return syncAnimate(led, variant)
 	case modeTest:
@@ -129,12 +129,10 @@ func newFrame(mode, variant, frame int) {
 		volumeHistory[volumeHistoryIndex] = vol
 	case modeSparkle:
 		sparkleNextFrame(variant)
-	case modeCustom0:
-		customNextFrame(frame, variant)
-	case modeCustom1:
-		customNextFrame(frame, variant)
-	case modeQA:
-		customNextFrame(frame, variant)
+	case modeCustom0, modeCustom1, modeQA:
+		customNextFrame(frame*millisPerFrame, variant)
+	case modeSync:
+		syncNextFrame(variant)
 	}
 }
 
@@ -495,6 +493,10 @@ var customPatternFile []byte // slice loaded in memory by loadPattern.
 
 var customPatternLoadDelay uint8 // delay in frames before running the pattern
 
+// Out of line: it has four callers (both custom modes, after receiving, and
+// sync mode's program variants).
+//
+//go:noinline
 func customLoadPattern(slot int, delay bool) {
 	// Invalidate the previous pattern.
 	customPattern = pattern.Pattern{}
@@ -515,11 +517,11 @@ func customLoadPattern(slot int, delay bool) {
 // We might want to use an actual timer instead some time in the future.
 const millisPerFrame = 37
 
-func customNextFrame(frame, variant int) {
+func customNextFrame(millis, variant int) {
 	// Call the 'nextFrame' function.
 	fn := customPattern.NextFrame1()
 	if fn != nil {
-		fn(frame * millisPerFrame)
+		fn(millis)
 		return
 	}
 
@@ -557,10 +559,10 @@ func customNextFrame(frame, variant int) {
 }
 
 // Show a pattern as it was loaded.
-func showCustom(led, frame, variant, slot int) Color {
+func showCustom(led, millis, slot int) Color {
 	fn := customPattern.GetPixel1()
 	if fn != nil {
-		c := fn(led, int(frame)*millisPerFrame)
+		c := fn(led, millis)
 		c = bits.ReverseBytes32(c << 8) // patterns use 0x00RRGGBB, we use 0x00BBGGRR so reverse
 		return Color(c)
 	}
