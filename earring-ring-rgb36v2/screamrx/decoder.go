@@ -33,6 +33,7 @@ import (
 	"codeberg.org/maaike328p/datatrans"
 	"codeberg.org/maaike328p/datatrans/dsp"
 	"codeberg.org/maaike328p/datatrans/ecc"
+	"github.com/aykevl/things/earring-ring-rgb36v2/rolled"
 )
 
 const (
@@ -224,9 +225,11 @@ func (d *Decoder) follow(peak int32) {
 			// bit shifted down from the upper one masked off. The trip
 			// count is a field because with the constant numFreqs the
 			// firmware build (-opt=2) unrolls the loop: 320 B of flash
-			// halving the levels one by one, 200 B fewer this way.
+			// halving the levels one by one, 200 B fewer this way, and
+			// rolled.Loop stops the 4x copy of what is left.
 			w := (*[numFreqs]uint32)(unsafe.Pointer(&d.lv))
 			for k := range d.nTones {
+				rolled.Loop()
 				w[k] = w[k] >> 1 & 0x7fff7fff
 			}
 		}
@@ -430,6 +433,9 @@ func (d *Decoder) analyze(samples []int32) {
 	}
 }
 
+// One copy: analyze calls it twice.
+//
+//go:noinline
 func (d *Decoder) toneOf(g *dsp.GoertzelFixed) tone {
 	s := (*goertzelState)(unsafe.Pointer(g))
 	cos := int32(int16(s.constants))
@@ -437,7 +443,37 @@ func (d *Decoder) toneOf(g *dsp.GoertzelFixed) tone {
 	re := sat16(s.q1 - (s.q2*cos)>>13)
 	im := sat16((s.q2 * sin) >> 13)
 	r2 := uint32(int32(re)*int32(re)) + uint32(int32(im)*int32(im))
-	return tone{re: re, im: im, mag: dsp.ISqrt32(r2)}
+	return tone{re: re, im: im, mag: isqrt32(r2)}
+}
+
+// isqrt32 is dsp.ISqrt32 (the square root, rounded down), digit by digit from
+// the highest power of four not above arg: dsp's loop has a fixed 16 steps,
+// which -opt=2 unrolled in full into toneOf, and a trip count that depends on
+// the data lets rolled.Loop keep it rolled. 1300 cycles more per window than
+// dsp's, which adcNextWindow's copy more than makes up for. TestISqrt32
+// checks that the two agree.
+func isqrt32(arg uint32) uint16 {
+	one := uint32(1) << 30
+	for one>>8 > arg {
+		rolled.Loop()
+		one >>= 8
+	}
+	for one > arg {
+		rolled.Loop()
+		one >>= 2
+	}
+	res := uint32(0)
+	for one != 0 {
+		rolled.Loop()
+		if arg >= res+one {
+			arg -= res + one
+			res = res>>1 + one
+		} else {
+			res >>= 1
+		}
+		one >>= 2
+	}
+	return uint16(res)
 }
 
 func sat16(v int32) int16 {
@@ -451,6 +487,7 @@ func (d *Decoder) timing(mask uint32) (int32, bool) {
 	// The products are scaled down by 2^6 so the sum of 31 fits int32.
 	var sr, si int32
 	for k := range numFreqs - 1 {
+		rolled.Loop()
 		if (mask>>k)&3 != 3 {
 			continue
 		}
@@ -504,6 +541,7 @@ func (d *Decoder) Process(samples []int32) int {
 func (d *Decoder) fsk() uint16 {
 	var r uint16
 	for i := range 16 {
+		rolled.Loop()
 		if d.tones[i*2].mag < d.tones[i*2+1].mag {
 			r |= 1 << i
 		}
@@ -552,6 +590,7 @@ func (d *Decoder) setAdjust(q8 int32) {
 //go:noinline
 func (d *Decoder) observe(content uint32, shift uint8) {
 	for k := range numFreqs {
+		rolled.Loop()
 		m := int32(d.tones[k].mag)
 		b := (content >> k) & 1
 		lvl := &d.lv[k][b]
@@ -645,6 +684,7 @@ func (d *Decoder) calibrate() int {
 func (d *Decoder) decide() uint32 {
 	var sym uint32
 	for k := range numFreqs {
+		rolled.Loop()
 		m := int32(d.tones[k].mag)
 		l0, l1 := int32(d.lv[k][0]), int32(d.lv[k][1])
 		if abs32(m-l1) < abs32(m-l0) {
@@ -898,6 +938,7 @@ func (d *Decoder) repair(spp uint8) bool {
 	n := spp + 2
 	var syn uint32
 	for _, w := range d.packet[:n] {
+		rolled.Loop()
 		syn ^= w
 	}
 	// Candidate 0: flip the least reliable bit of each failing column.
@@ -916,6 +957,7 @@ func (d *Decoder) repair(spp uint8) bool {
 	var col [chaseBits]uint8
 	nAtoms := 0
 	for k := range numFreqs {
+		rolled.Loop()
 		var c uint16
 		if (syn>>k)&1 != 0 {
 			if d.min2[k] == 255 {
@@ -980,12 +1022,13 @@ func (d *Decoder) repair(spp uint8) bool {
 }
 
 // flipFailing flips the least reliable bit of each column whose parity fails
-// in syn: repair's first candidate, and (being an XOR) its undo. One copy:
-// -opt=2 unrolls the loop.
+// in syn: repair's first candidate, and (being an XOR) its undo. One copy, and
+// rolled (-opt=2 unrolled it to 312 bytes).
 //
 //go:noinline
 func (d *Decoder) flipFailing(syn uint32) {
 	for k := range numFreqs {
+		rolled.Loop()
 		if (syn>>k)&1 != 0 {
 			d.packet[d.idx1[k]] ^= 1 << k
 		}
