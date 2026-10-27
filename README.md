@@ -12,7 +12,9 @@ Firmware in repo root contains three pre-programmed patterns you can replace. [h
 
 ## Custom beat tracking patterns
 
-This firmware adds support for using the beat tracking variables from flashed patterns. More information can be found in the [sync program readme](earring-ring-rgb36v2/SYNC-PROGRAMS.md)
+This firmware adds support for using the beat tracking variables from flashed patterns. More information can be found in the [sync program readme](earring-ring-rgb36v2/SYNC-PROGRAMS.md).
+
+You'll need to paste the contents of [sync-sim.js](editor/sync-sim.js) into the devtools console when on the [LED animation editor](https://aykevl.nl/apps/led-editor/).
 
 ## License
 
