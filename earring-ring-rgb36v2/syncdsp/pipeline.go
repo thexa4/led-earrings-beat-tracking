@@ -1,5 +1,7 @@
 package syncdsp
 
+import "github.com/aykevl/things/earring-ring-rgb36v2/rolled"
+
 // The per-frame processing pipeline:
 //
 //	raw uint16 samples (one analysis window)
@@ -392,6 +394,7 @@ func (p *Pipeline) agcUpdate() {
 		p.filters.rescaleGain(d)
 		off := d << 8
 		for i := range p.smooth {
+			rolled.Loop()
 			p.smooth[i] += off
 			p.prevSmooth[i] += off
 			p.smoothSnap[i] += off
@@ -522,6 +525,7 @@ func (p *Pipeline) endFrame() Events {
 		p.smooth = e
 	} else {
 		for i := range e {
+			rolled.Loop()
 			// Rounded: an unrounded shift stalls upward forever once the
 			// difference is below 2^SmoothShift (0.75 dB), while downward
 			// always moves at least one LSB. That asymmetry biases the
@@ -537,6 +541,7 @@ func (p *Pipeline) endFrame() Events {
 	{
 		sm := p.smooth[0]
 		for _, v := range p.smooth[1:] {
+			rolled.Loop()
 			if v > sm {
 				sm = v
 			}
@@ -561,6 +566,7 @@ func (p *Pipeline) endFrame() Events {
 	// centroid, the spread decays and PatternMinDev holds the middle pattern.
 	c := int32(0)
 	for i, v := range p.smooth {
+		rolled.Loop()
 		c += v * PatternWeights[i]
 	}
 	c *= PatternCentroidScale
@@ -595,7 +601,7 @@ func (p *Pipeline) endFrame() Events {
 	// is rising underfoot" view. At the push itself this is exactly the hash
 	// the ring stores.
 	p.smoothSnap = p.smooth
-	h := hashFrame(p.smoothSnap, p.prevSmooth, &dev)
+	h := hashFrame(&p.smoothSnap, &p.prevSmooth, &dev)
 	p.lastHash = h
 
 	// 5d. Settle tracking. The hash *identity* - shape and hot fields, which
@@ -1049,8 +1055,9 @@ func (p *Pipeline) decide(h uint32, barBeat bool) {
 	// the pattern, not that the lag selects it.
 	returned := false
 	if b.Locked {
-		for _, lagBars := range [3]int32{LagBars1, LagBars2, LagBars3} {
-			nominal := lagBars * BeatsPerBar
+		// LagBars1, LagBars2, LagBars3, by doubling: 68 B less than a range
+		// over the three, which -opt=2 unrolled.
+		for nominal := int32(LagBars1 * BeatsPerBar); nominal <= LagBars3*BeatsPerBar; nominal *= 2 {
 			for off := -LagTolerance; off <= LagTolerance; off++ {
 				lag := nominal + int32(off)
 				if lag < 1 || b.beat < lag || p.ringCount <= lag {
@@ -1374,14 +1381,14 @@ func (p *Pipeline) pattern() int32 {
 // transients).
 //
 //go:noinline
-func hashFrame(cur, old [NBands]int32, dev *[NBands]int32) uint32 {
+func hashFrame(cur, old, dev *[NBands]int32) uint32 {
 	var w uint32
 	for b := 0; b < NBands; b++ {
 		if cur[b]-old[b] > TemporalDeadband {
 			w |= 1 << uint(b)
 		}
 	}
-	return w | shapeCode(dev) | hotBits(&cur)
+	return w | shapeCode(dev) | hotBits(cur)
 }
 
 // hashDist is the Hamming distance between two hashes over the bits the hash

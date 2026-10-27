@@ -255,7 +255,8 @@ const (
 	// disjoint.
 	LagTolerance = 2
 
-	// LagBars are the "2, 4, 8 bars ago" periodicity confirmations.
+	// LagBars are the "2, 4, 8 bars ago" periodicity confirmations. Each is
+	// twice the one before: decide steps through them by doubling.
 	LagBars1 = 2
 	LagBars2 = 4
 	LagBars3 = 8
@@ -470,6 +471,12 @@ const (
 	BeatFluxBand  = 2
 	BeatFluxBands = 2
 )
+
+// Each LagBars is twice the one before (decide steps through them by doubling).
+var _ [LagBars2 - 2*LagBars1]struct{}
+var _ [2*LagBars1 - LagBars2]struct{}
+var _ [LagBars3 - 2*LagBars2]struct{}
+var _ [2*LagBars2 - LagBars3]struct{}
 
 // Display levels (Pipeline.Level): per-band loudness scaled to 0..255 for the
 // animations and for uploaded programs (see SYNC-PROGRAMS.md). Nothing the

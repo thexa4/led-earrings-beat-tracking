@@ -303,7 +303,7 @@ func TestHashDeadband(t *testing.T) {
 	dev := spectralDevs(&cur)
 	// A flat spectrum has every band within the floor of the max, so the hot
 	// field is all-ones here; the temporal field is what this test is about.
-	if h := hashFrame(cur, old, &dev) & ((1 << NBands) - 1); h != 0 {
+	if h := hashFrame(&cur, &old, &dev) & ((1 << NBands) - 1); h != 0 {
 		t.Errorf("identical flat frames should have no temporal bits, got %015b", h)
 	}
 	// Half the deadband must never flip; twice it must. Expressed through the
@@ -311,13 +311,13 @@ func TestHashDeadband(t *testing.T) {
 	// to 0.75 dB by the podcast-wide sweep (tools/hashsweep.py), and a test
 	// that names the old number guards nothing after a retune.
 	old[3] = cur[3] - TemporalDeadband/2
-	if h := hashFrame(cur, old, &dev); h&(1<<3) != 0 {
+	if h := hashFrame(&cur, &old, &dev); h&(1<<3) != 0 {
 		t.Errorf("change of %d Q8 (half the %d deadband) flipped a temporal bit: %015b",
 			TemporalDeadband/2, TemporalDeadband, h)
 	}
 	// Well above the deadband: must flip.
 	old[3] = cur[3] - 2*TemporalDeadband
-	if h := hashFrame(cur, old, &dev); h&(1<<3) == 0 {
+	if h := hashFrame(&cur, &old, &dev); h&(1<<3) == 0 {
 		t.Errorf("change of %d Q8 (twice the deadband) did not flip: %015b",
 			2*TemporalDeadband, h)
 	}
@@ -333,7 +333,7 @@ func TestHashLevelInvariant(t *testing.T) {
 		old[b] = cur[b] - int32(b%3)*150
 	}
 	dev := spectralDevs(&cur)
-	h0 := hashFrame(cur, old, &dev)
+	h0 := hashFrame(&cur, &old, &dev)
 	if h0 == 0 {
 		t.Fatalf("test input produces a zero hash, pick a livelier one")
 	}
@@ -344,7 +344,7 @@ func TestHashLevelInvariant(t *testing.T) {
 			o2[b] = old[b] + off
 		}
 		dev2 := spectralDevs(&c2)
-		if h := hashFrame(c2, o2, &dev2); h != h0 {
+		if h := hashFrame(&c2, &o2, &dev2); h != h0 {
 			t.Errorf("offset %d changed hash %015b -> %015b", off, h0, h)
 		}
 	}
