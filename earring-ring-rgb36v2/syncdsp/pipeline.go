@@ -592,8 +592,7 @@ func (p *Pipeline) endFrame() Events {
 	// spectrum, but its *temporal* field reads p.prevSmooth, which only
 	// advances at ring pushes (below). Between beats that makes the per-frame
 	// hash the current smoothed spectrum against the last beat's: a live "what
-	// is rising underfoot" view, and the value the golden table and the device
-	// selftest compare against. At the push itself this is exactly the hash
+	// is rising underfoot" view. At the push itself this is exactly the hash
 	// the ring stores.
 	p.smoothSnap = p.smooth
 	h := hashFrame(p.smoothSnap, p.prevSmooth, &dev)

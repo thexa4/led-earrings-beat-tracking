@@ -8,8 +8,7 @@ import (
 
 // TestBankConstants verifies the hardcoded Q14 ladder coefficients against
 // float math on the host, and that the corners are log spaced and in range.
-// The device cannot do this check (no floats), so the golden selftest depends
-// on these being right.
+// The device cannot do this check (no floats).
 func TestBankConstants(t *testing.T) {
 	prev := float64(SampleRate) / 2
 	for i, k := range BankK {

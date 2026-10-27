@@ -2,12 +2,8 @@ package syncdsp
 
 // A deterministic, integer-only EDM-like stimulus generator.
 //
-// This is the shared test signal for the host agreement harness and the
-// on-device boot selftest: because it is a pure function of the sample index
-// with integer math only, the host and the device generate bit-identical
-// audio. That makes the selftest a true device/host parity check: the device
-// runs the C Goertzel path over samples produced here and compares hashes
-// against the golden table computed by the pure-Go path on the host.
+// This is the test signal for the host agreement harness: a pure function of
+// the sample index with integer math only, so every run sees the same audio.
 //
 // Output is 16-bit unsigned around mid-rail (32768), matching the ADC.
 //

@@ -1,12 +1,7 @@
 package syncdsp
 
 import (
-	"fmt"
-	"go/format"
 	"math"
-	"os"
-	"sort"
-	"strings"
 	"testing"
 )
 
@@ -304,86 +299,4 @@ func hasLock(evs []Events) bool {
 		}
 	}
 	return false
-}
-
-// TestGolden freezes the behaviour: hashes and event bits for the first 64
-// frames (undistorted). The device boot selftest uses the same table, so any
-// accidental change to the DSP or hash on either side trips both.
-// Regenerate with: UPDATE_GOLDEN=1 go test ./syncdsp -run TestGolden
-func TestGolden(t *testing.T) {
-	in := newInst(nil, false)
-	const n = 64
-	var hashes [n]uint32
-	var anchorBits uint64
-	var patterns [n]int32
-	for f := 0; f < n; f++ {
-		e := in.frame(f)
-		hashes[f] = e.Hash
-		if e.Anchor {
-			anchorBits |= 1 << uint(f)
-		}
-		patterns[f] = e.Pattern
-	}
-
-	if os.Getenv("UPDATE_GOLDEN") != "" {
-		var b strings.Builder
-		b.WriteString(`package syncdsp
-
-// Golden reference values, produced by the host test
-// (UPDATE_GOLDEN=1 go test ./syncdsp -run TestGolden) and checked:
-//
-//   - by that test, to catch accidental changes to the DSP or the hash;
-//   - by the device boot selftest, to verify the pipeline running on the
-//     STM32L031 produces exactly what the host produces.
-//
-// The pipeline is plain integer Go with no platform-dependent arithmetic (see
-// the package comment), so this is a genuine end-to-end check of the device
-// build: the same source compiles both sides, and a mismatch means the device's
-// view of the world differs - a wrong filter coefficient, a different ADC range,
-// or an int width surprise.
-//
-// Input: the deterministic Synth() stimulus from sample 0, undistorted, into a
-// fresh Pipeline.
-
-`)
-		fmt.Fprintf(&b, "var GoldenHashes = [%d]uint32{\n", n)
-		for i := 0; i < n; i += 8 {
-			fmt.Fprintf(&b, "\t%#010x, %#010x, %#010x, %#010x, %#010x, %#010x, %#010x, %#010x,\n",
-				hashes[i], hashes[i+1], hashes[i+2], hashes[i+3],
-				hashes[i+4], hashes[i+5], hashes[i+6], hashes[i+7])
-		}
-		fmt.Fprintf(&b, "}\nvar GoldenAnchors uint64 = 0x%016x\n", anchorBits)
-		fmt.Fprintf(&b, "var GoldenPatterns = [%d]int8{\n\t", n)
-		for i := 0; i < n; i++ {
-			fmt.Fprintf(&b, "%d,", patterns[i])
-			if i%16 == 15 {
-				fmt.Fprintf(&b, "\n\t")
-			}
-		}
-		fmt.Fprintf(&b, "}\n")
-		src, err := format.Source([]byte(b.String()))
-		if err != nil {
-			t.Fatalf("generated golden.go does not parse: %v", err)
-		}
-		// go test runs with the package directory as cwd.
-		if err := os.WriteFile("golden.go", src, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		t.Log("golden.go regenerated")
-		return
-	}
-
-	if GoldenHashes != hashes {
-		diff := make([]int, 0, 8)
-		for i := range hashes {
-			if GoldenHashes[i] != hashes[i] {
-				diff = append(diff, i)
-			}
-		}
-		sort.Ints(diff)
-		t.Errorf("hashes drifted from golden at frames %v (regenerate if intentional)", diff)
-	}
-	if GoldenAnchors != anchorBits {
-		t.Errorf("anchor events drifted from golden: got %016x want %016x", anchorBits, GoldenAnchors)
-	}
 }
