@@ -522,7 +522,7 @@ func (p *Pipeline) endFrame() Events {
 	// the tracked range, so the smoothing itself does not depend on where the
 	// beat boundaries fell.
 	if p.frame == 0 {
-		p.smooth = e
+		copy(p.smooth[:], e[:])
 	} else {
 		for i := range e {
 			rolled.Loop()
@@ -600,7 +600,12 @@ func (p *Pipeline) endFrame() Events {
 	// hash the current smoothed spectrum against the last beat's: a live "what
 	// is rising underfoot" view. At the push itself this is exactly the hash
 	// the ring stores.
-	p.smoothSnap = p.smooth
+	//
+	// copy, not an array assignment, here and for the other snapshots: these
+	// arrays lie at offsets 108 to 203 of p, mostly past the 124 a Thumb load
+	// or store can encode, so an assignment was loads and stores each behind
+	// its own offset (64 B in decide), and copy is two ldm/stm pairs.
+	copy(p.smoothSnap[:], p.smooth[:])
 	h := hashFrame(&p.smoothSnap, &p.prevSmooth, &dev)
 	p.lastHash = h
 
@@ -1033,7 +1038,7 @@ func (p *Pipeline) decide(h uint32, barBeat bool) {
 
 	// The temporal reference advances now, at a musical position: the next
 	// hash (per-frame or at the next push) diffs against this spectrum.
-	p.prevSmooth = p.smoothSnap
+	copy(p.prevSmooth[:], p.smoothSnap[:])
 
 	// Periodicity confirmation - did the music come back around?
 	//
