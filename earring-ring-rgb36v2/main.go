@@ -64,6 +64,7 @@ func main() {
 
 		// Bitbang the LEDs.
 		updateLEDs()
+		benchPass() // -tags passcount only
 
 		index++
 		if index == 12 {
