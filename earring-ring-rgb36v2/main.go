@@ -64,6 +64,15 @@ func main() {
 		index++
 		if index == 12 {
 			index = 0
+			if syncRunning && syncAnimFrame>>1 == syncMainFrame {
+				// At 16 MHz twelve passes take ~5 ms instead of ~50: in
+				// sync mode a frame only ends with every other analysis
+				// frame (32 per second, near the other modes' 20-27), or a
+				// 150 ms press would be a long one and switch the earring
+				// off.
+				continue
+			}
+			syncMainFrame = syncAnimFrame >> 1
 			frame++
 
 			// Do per animation process, such as processing audio samples

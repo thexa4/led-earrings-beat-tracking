@@ -88,6 +88,8 @@ var (
 	syncSlot        int // custom slot loaded into animationBuf, plus one (0: none)
 	syncCustomFrame int // syncAnimFrame/2 at the program's last nextFrame
 
+	syncMainFrame int // syncAnimFrame/2 at the main loop's last frame (see main)
+
 	syncRunning bool  // capture is up (also: stopSync is idempotent)
 	syncRead    int   // next sample to consume from adcData
 	syncFed     int32 // samples fed into the current analysis frame
