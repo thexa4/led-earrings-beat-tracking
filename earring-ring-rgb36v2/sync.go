@@ -299,6 +299,9 @@ var _ [numNoisePatterns - syncdsp.NumPatterns]struct{} // every pattern has a pa
 //	4  interference pulse (patterns.go)
 //	5  synthwave (patterns.go)
 //
+// A long press on the variant button swaps red and blue in all of them
+// (see animate).
+//
 // Until flash ran out there was also a hash readout, an instrument for
 // checking earrings against each other (section hash as a color, a dot
 // chasing the beat); it is an uploadable program now, in SYNC-PROGRAMS.md.

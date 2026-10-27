@@ -28,6 +28,10 @@ pattern in the normal web editor; nothing about uploading changes.
 | 5 | **interference pulse**: two rainbow waves running around the ring at slightly different speeds, with a white flash on the beat that fades out until the next one |
 | 6 | **synthwave**: the ring strobes red and cyan, white for the first quarter of every beat |
 
+Hold the variant button for about a second to swap red and blue in every
+sync variant, your patterns included. Hold it again to swap them back. The
+earring remembers the swap when it is switched off.
+
 When you switch to variant 3 or 4 the earring waits about a second before
 it starts your pattern, just like the custom pattern modes do. If a slot is
 empty you see a single blue LED.

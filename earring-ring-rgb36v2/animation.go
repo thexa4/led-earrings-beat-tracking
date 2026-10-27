@@ -98,7 +98,13 @@ func animate(mode, variant, led, frame int) Color {
 	case modeCustom1:
 		return showCustom(led, frame*millisPerFrame, 1)
 	case modeSync:
-		return syncAnimate(led, variant)
+		c := syncAnimate(led, variant)
+		if storedState[stateOffsetSyncSwapRB] != 0 {
+			// Red and blue swapped (variant button long press): 0x00BBGGRR
+			// becomes 0x00RRGGBB, the same trick as showCustom.
+			c = Color(bits.ReverseBytes32(uint32(c) << 8))
+		}
+		return c
 	case modeBasic:
 		return basicPattern(led, frame*millisPerFrame, variant)
 	case modeTest:

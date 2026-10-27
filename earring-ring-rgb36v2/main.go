@@ -1,13 +1,14 @@
 package main
 
-// State: current mode, current variant, previous variants, 4 hash bytes
+// State: current mode, sync red/blue swap, variant per mode, 4 hash bytes
 //
 //go:align 4 // flashWrite reinterprets this as words
 var storedState [32]uint8
 
 const (
-	stateOffsetMode     = 0
-	stateOffsetVariants = 2
+	stateOffsetMode       = 0
+	stateOffsetSyncSwapRB = 1 // nonzero: sync mode shows red and blue swapped
+	stateOffsetVariants   = 2
 )
 
 // Saved variant for each mode (so that the variant is kept between mode
@@ -140,7 +141,7 @@ func main() {
 				// Switch to the next animation variant when the variant button
 				// is released.
 				variantBtnPressed := button2Pressed()
-				if !variantBtnPressed && variantBtnFramesPressed != 0 {
+				if !variantBtnPressed && variantBtnFramesPressed > 0 {
 					newVariant := animationNextVariant(mode, variant)
 					if newVariant != variant {
 						variant = newVariant
@@ -174,6 +175,14 @@ func main() {
 						variant = 0
 						modeVariants[mode] = uint8(variant)
 						saveState()
+					} else if mode == modeSync {
+						// Long press in sync mode swaps red and blue.
+						storedState[stateOffsetSyncSwapRB] ^= 1
+						saveState()
+
+						// Still held: no second toggle at 60 frames, and no
+						// variant step on release.
+						variantBtnFramesPressed = -0x8000_0000
 					}
 				}
 			}
