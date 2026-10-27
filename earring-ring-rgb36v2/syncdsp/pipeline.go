@@ -174,9 +174,9 @@ type Pipeline struct {
 	lvlN    int8  // NBands+1, see levels
 	Level   [NBands + 1]uint8
 
-	// The beat comb's input (BeatTracker.Tick): the sum over the bands (and
-	// the overall level) of the positive two-frame log2 flux. levels computes
-	// it because it already walks the bands; lvlHist holds the last two frames.
+	// The beat comb's input (BeatTracker.Tick): the sum over the mid bands
+	// (BeatFluxBand) of the positive two-frame log2 flux. levels computes it
+	// because it already walks the bands; lvlHist holds the last two frames.
 	lvlHist  [2][NBands + 1]int16
 	beatFlux int32
 	lvlOff   int32 // gain step (Q8 log2) not yet applied to lvlPeak and lvlHist
@@ -731,7 +731,9 @@ func (p *Pipeline) levels(e *[NBands]int32, all int32) {
 		if i < NBands {
 			v = e[i]
 		}
-		flux += max(v-int32(p.lvlHist[1][i])-off, 0)
+		if uint(i-BeatFluxBand) < BeatFluxBands {
+			flux += max(v-int32(p.lvlHist[1][i])-off, 0)
+		}
 		p.lvlHist[1][i] = p.lvlHist[0][i] + int16(off)
 		p.lvlHist[0][i] = int16(v)
 		pk := max(p.lvlPeak[i]+off-LevelPeakDecayQ8, v)
@@ -1508,14 +1510,22 @@ type BeatTracker struct {
 // a phase-locked loop that pulled the grid toward each bass onset: those
 // onsets are as often a bass note or a fill as a kick, and every one of them
 // moved the grid, so two earrings rarely agreed on where the beat was.
-// Averaged over eight beats the kick wins. The flux is summed over all bands,
-// not taken from the bass band alone: the kick's click reaches up the
-// spectrum and an off-beat bass note does not, so fewer grids settle on the
-// off-beat. Measured against a kick-based reference (librosa's tracker on the
-// mel bands below 200 Hz) on three 10-minute stretches of an EDM set, through
-// the four device scenarios: beats within 70 ms of a kick 31% -> 60%, both
-// earrings' beats within 32 ms of each other 39% -> 82% (beat_eval_test.go;
-// bass-band flux alone: 56%, 73%).
+// Averaged over eight beats the kick wins. Measured against a kick-based
+// reference (librosa's tracker on the mel bands below 200 Hz) on three
+// 10-minute stretches of an EDM set, through the four device scenarios: beats
+// within 70 ms of a kick 31% -> 60%, both earrings' beats within 32 ms of each
+// other 39% -> 82% (beat_eval_test.go; bass-band flux alone: 56%, 73%).
+//
+// The flux comes from the mid bands only (BeatFluxBand). Summed over all
+// bands, the bench earrings settled on opposite beats: on this music the hats
+// and the bassline both rise on the off-beat, the kick wins or loses against
+// them by a small margin, and which way it goes depends on how loud each
+// microphone hears the top and the bottom (room, placement). Replayed from
+// both earrings' recorded band energies on three stretches, mid bands against
+// all bands: beats within 32 ms 33% -> 53%, half a beat apart 48% -> 23%,
+// beats on the kick unchanged (56% -> 57%); of all 3^9 band weightings in
+// {0,1,2} none did better on agreement. The host scenarios hear one spectrum
+// on both earrings and cannot show this (pair 0.82 either way).
 //
 //go:noinline
 func (b *BeatTracker) Tick(onset bool, x int32, frame int32) (bool, bool) {

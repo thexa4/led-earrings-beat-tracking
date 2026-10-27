@@ -386,9 +386,8 @@ where the beat was.
   refined to Q8 frames by the parabola through it and its neighbours
   (143 BPM is 26.85 frames).
 * **Phase** — a beat comb in `Tick`: the positive two-frame log flux summed
-  over the bands (the kick's click reaches up the spectrum, an off-beat bass
-  note does not), leaky-averaged (8 beats) into one bin per frame of the beat
-  cycle; the beat fires on the bin with the most flux, with a half-period
+  over the mid bands 2-3 (~1-2.5 kHz; see "opposite beats" below),
+  leaky-averaged (8 beats) into one bin per frame of the beat cycle; the beat fires on the bin with the most flux, with a half-period
   refractory. `beat` is a *monotonic* counter — nothing ever resets it (a reset
   shifts one device's ring against the others').
 * Measured with `beat_eval_test.go` against a kick reference (librosa's DP
@@ -417,9 +416,37 @@ where the beat was.
   run-to-run noise, not kept. Pattern agreement swings 37-83% between runs
   of the *same* firmware (5-8 changes per 5 min), so one run says nothing
   about it.
-  Next: a phase choice both earrings make from what they hear alike, e.g.
-  prefer the bin where the lowest band rises most; tune it on screamdump-style
-  recordings of both microphones, which the host replay can then reproduce.
+* **Opposite beats** (2026-10-27). `tools/syncbands.py record` polls each
+  earring's band energies (lvlHist) and comb state at ~100 reads/s, so every
+  frame of what both microphones heard is on file; the comb does not feed
+  back into the audio, so `syncbands.py replay` scores any flux rule on it
+  exactly (it reproduced the live runs: 40:00 kick hits L 68% / R 35% replayed
+  vs 70% / 29% live). Folding each band's flux on the kick grid shows why all
+  bands split the earrings: the off-beat has *two* sources - the hats (bands
+  0-1) and the sidechained bassline (bands 5-7 and the total) - and the kick
+  beats them by a small margin that depends on how loud each microphone hears
+  the top and the bottom. At 20:00 the left earring hears the hats so loudly
+  that its comb takes the off-beat; at 40:00 the right one hears the bassline
+  louder than the kick in every band. The bass band alone is no fix either:
+  the left earring hears a bass note a quarter beat before the kick that the
+  right hardly does (a room mode, by the look of it). The mids, 1-2.5 kHz
+  (kick click, clap), are what the two hear most alike. Replayed on 0:00,
+  20:00 and 40:00 (0:00 recorded after the choice, as a holdout), all bands
+  -> bands 2-3: within 32 ms 35/41/22% -> 48/65/47%, half a beat apart
+  48/29/65% -> 27/13/33%, kick hits unchanged on average (56% -> 57%). No
+  weighting of the nine bands with weights in {0,1,2} beats it on agreement;
+  adding band 6 lifts kick hits to 65% but drops 40:00 back to 29%.
+  Live, flashed (`-tags syncboot`, one run each, 40:00 twice): within 32 ms
+  58% / **69% / 42%, 40%** (was - / 44% / 12%), half a beat apart 20% / 13% /
+  42%, 40% (was - / 29% / 73%). The cost: at 40:00 both earrings now often
+  sit 3/8 of a beat after the kick, where the right earring's mids peak, so
+  kick hits there fell (L 70% -> 32-36%, R 29% -> 18-31%); at 20:00 L 38 ->
+  52%, R 66 -> 49%. The left-over disagreement is minutes 2-4 of 40:00, where
+  the right earring hears the off-beat louder than the kick in every band,
+  even above 4 kHz, where its off-beat energy lines up with the bass note
+  rather than the hats - what a rattle or distortion at that earring would
+  look like. Host scenarios (one spectrum for both devices) are flat: pair
+  0.817 -> 0.815, hit 0.595 -> 0.608.
 
 Budget ~100 cycles/frame plus the scan, ~220 B RAM.
 

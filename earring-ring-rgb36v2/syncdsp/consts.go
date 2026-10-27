@@ -461,6 +461,14 @@ const (
 	// BeatCombShift is the leak of the beat comb, per visit (per beat): 3 is
 	// eight beats, about 3.5 s at 140 BPM.
 	BeatCombShift = 3
+	// BeatFluxBand and BeatFluxBands pick the bands the comb's flux is summed
+	// over: bands 2 and 3, the mids around 1-2.5 kHz, where the kick's click
+	// and the clap sit. Above them the hats rise on the off-beat; below, the
+	// bassline does, and how loud either is depends on the microphone and the
+	// room, so with all bands two earrings settled on opposite beats (see
+	// Pipeline.levels).
+	BeatFluxBand  = 2
+	BeatFluxBands = 2
 )
 
 // Display levels (Pipeline.Level): per-band loudness scaled to 0..255 for the

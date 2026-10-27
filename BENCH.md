@@ -551,6 +551,14 @@ Measured 2026-10-27 on scream-rx (re-measure):
   2900 cycles per `getPixel`. Loss shows as frames/s under the earring's sample rate
   / 250 (43/s with 16 divisions per pixel); the backlog is only a hint, as it is
   sampled from the host.
+- **What both microphones heard, frame by frame** (`tools/syncbands.py record`,
+  `-tags syncboot`, `--elf` the image on the earrings): ~100 reads/s of the
+  pipeline's band energies and comb state per earring, enough for every 64/s frame
+  (~2% lost, filled from the next read). `syncbands.py replay` runs the beat comb
+  on any band set of that recording; it reproduces the live beats, so a phase rule
+  can be tried on the bench's real microphones without flashing. One run is not
+  enough to judge live beat agreement: per-minute agreement swings 10-70% inside
+  one 5-minute run.
 - **`pkill -f` in a one-line command** matches the command line it is part of when
   that line also contains what the pattern looks for (e.g. a `pkill -f "ssh .*-L
   4445:"` followed by the `ssh -L 4445:...` that reopens the tunnel kills its own
