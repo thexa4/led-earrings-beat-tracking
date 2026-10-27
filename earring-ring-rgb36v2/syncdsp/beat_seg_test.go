@@ -18,6 +18,17 @@ func TestBeatSeg(t *testing.T) {
 		t.Skip()
 	}
 	src := readPCM16(t, path)
+	norm := func(f [16]float64) []int {
+		mx := 0.0
+		for _, v := range f {
+			mx = max(mx, v)
+		}
+		r := make([]int, 16)
+		for i, v := range f {
+			r[i] = int(99 * v / mx)
+		}
+		return r
+	}
 	refT, _ := loadRef(t, path, src)
 	env := refOnset(src, 64)
 	t0, t1 := float64(seg)*20, float64(seg+1)*20
@@ -53,24 +64,27 @@ func TestBeatSeg(t *testing.T) {
 	var p Pipeline
 	p.Init()
 	win := make([]uint16, Window)
+	var band [NBands][16]float64
+	var pe, pe2 [NBands]int32
 	for n := 0; (n+1)*Window < len(src); n++ {
 		for i := range win {
 			win[i] = uint16(int32(src[n*Window+i])/4 + benchDC)
 		}
 		p.Process(win)
-		fold(&flux, float64(n+1)*Window/16000, float64(p.beatFlux))
-	}
-	norm := func(f [16]float64) []int {
-		mx := 0.0
-		for _, v := range f {
-			mx = max(mx, v)
+		tt := float64(n+1) * Window / 16000
+		fold(&flux, tt, float64(p.beatFlux))
+		var e [NBands]int32
+		for i, m := range p.energies {
+			e[i] = log2e(m)
+			fold(&band[i], tt, float64(max(e[i]-pe2[i], 0)))
 		}
-		r := make([]int, 16)
-		for i, v := range f {
-			r[i] = int(99 * v / mx)
-		}
-		return r
+		pe2, pe = pe, e
 	}
+	defer func() {
+		for i := range band {
+			t.Logf("seg %d  band %d flux  %v", seg, i, norm(band[i]))
+		}
+	}()
 	t.Logf("seg %d  <150Hz energy %v", seg, norm(lo))
 	t.Logf("seg %d  ref onset     %v", seg, norm(onset))
 	t.Logf("seg %d  device flux   %v", seg, norm(flux))

@@ -441,6 +441,11 @@ func TestBeatEval(t *testing.T) {
 // hears-right.wav: what each earring's microphone heard of the same music)
 // through two pipelines, as two earrings in the same room. Their lag is found
 // from the envelopes and taken out, so "pair" measures the trackers.
+//
+// The pair recorded so far is no beat benchmark: at RMS 10-100 counts with
+// nearly all its energy above 1.5 kHz after the first 15 s (a small
+// loudspeaker, or an upload's tones) neither the pipeline nor librosa finds a
+// steady tempo in it.
 func TestBeatHears(t *testing.T) {
 	pl, pr := os.Getenv("HEARSL"), os.Getenv("HEARSR")
 	if pl == "" || pr == "" {
