@@ -577,6 +577,15 @@ Measured 2026-10-27 on scream-rx (re-measure):
   can be tried on the bench's real microphones without flashing. One run is not
   enough to judge live beat agreement: per-minute agreement swings 10-70% inside
   one 5-minute run.
+- **Pressing a button over SWD**: the buttons are pull-up inputs (mode PB7, variant
+  PB3) shorted to ground, so writing the pin low in ODR (BSRR) and setting it to
+  output in MODER reads exactly like a press, and MODER back to input releases it.
+  While the earring sleeps (stop mode) halt the core first, or the GPIO writes do
+  not land; set DBGMCU_CR.DBG_STOP (with RCC_APB2ENR.DBGEN) to keep the debug port
+  up in stop mode at all.
+- **Memory reads while the core is in stop mode come back as zeros**, flash and RAM
+  alike (the vector table too): halt first. A sleeping earring looked like it had
+  wiped its state page and `storedState`; halted, both were intact.
 - **`pkill -f` in a one-line command** matches the command line it is part of when
   that line also contains what the pattern looks for (e.g. a `pkill -f "ssh .*-L
   4445:"` followed by the `ssh -L 4445:...` that reopens the tunnel kills its own
