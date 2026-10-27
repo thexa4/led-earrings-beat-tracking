@@ -182,7 +182,8 @@ type Decoder struct {
 	LastData bool
 
 	// Input right shift (see Gain).
-	gain uint8
+	gain   uint8
+	nTones uint8 // numFreqs, see follow
 
 	// Mean distance of a sample from its median of five and from its
 	// interpolation, Q4 (see despike).
@@ -219,15 +220,23 @@ func (d *Decoder) follow(peak int32) {
 	case peak > agcPeak:
 		d.gain++
 		if d.state != stateSearch {
-			for k := range d.lv {
-				d.lv[k][0] >>= 1
-				d.lv[k][1] >>= 1
+			// A tone's two levels are one word: halve both at once, the
+			// bit shifted down from the upper one masked off. The trip
+			// count is a field because with the constant numFreqs the
+			// firmware build (-opt=2) unrolls the loop: 320 B of flash
+			// halving the levels one by one, 200 B fewer this way.
+			w := (*[numFreqs]uint32)(unsafe.Pointer(&d.lv))
+			for k := range d.nTones {
+				w[k] = w[k] >> 1 & 0x7fff7fff
 			}
 		}
 	case peak < agcPeak/4 && d.gain > 0 && d.state == stateSearch:
 		d.gain--
 	}
 }
+
+// follow's word view of lv needs it word aligned.
+var _ [0 - unsafe.Offsetof(Decoder{}.lv)%4]byte
 
 // Impulse filter. A sample is an impulse when it is far both from the
 // median of the five samples around it and from the cubic interpolation of
@@ -352,6 +361,7 @@ func (d *Decoder) Initialize(data []uint32, maxMessageSize, sampleRate int, trim
 	d.fountain.Data = data
 	d.maxMessageSize = uint16(min(maxMessageSize, len(data)*4))
 	d.trimStep = int32(trimStep)
+	d.nTones = numFreqs
 	if sampleRate != 10000 {
 		panic("screamrx: sample rate")
 	}

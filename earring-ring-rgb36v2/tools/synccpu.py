@@ -8,7 +8,7 @@
 
 sb.bin must sit next to sb.elf. For each program, the whole flash is written
 (firmware, the program in custom slot 0, and a saved state that boots into
-sync mode variant 2 = slot 0) through the running OpenOCD servers, then after
+sync mode variant 3 = slot 0) through the running OpenOCD servers, then after
 --settle seconds both earrings are measured for --seconds:
 
   passes/s   main-loop passes (main.syncPolls). Each draws 3 LEDs (3 getPixel
@@ -171,8 +171,8 @@ def main():
         syms[nm] = (addr, sz) if nm == "main.animationBuf" else addr
         if typ == "FUNC":
             fn.append((addr & ~1, sz, typ, nm))
-    runs = [("builtin pulse", b"\0" * 4, 0)] if a.builtin else []
-    runs += [(os.path.basename(p), open(p, "rb").read(), 2) for p in a.progs]
+    runs = [("builtin pulse", b"\0" * 4, 1)] if a.builtin else []
+    runs += [(os.path.basename(p), open(p, "rb").read(), 3) for p in a.progs]
     work = tempfile.mkdtemp(prefix="synccpu-")
     for name, prog, var in runs:
         program(os.path.splitext(a.elf)[0] + ".bin", image(prog, var), work)

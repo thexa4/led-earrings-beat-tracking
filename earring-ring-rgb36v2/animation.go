@@ -46,7 +46,7 @@ const variantsPerMode = "\x03" + // modeTrace
 	"\x0d" + // modeVUMeter (numStaticColors)
 	"\x00" + // modeCustom0: capped by the pattern itself
 	"\x00" + // modeCustom1: ditto
-	"\x06" + // modeSync: pulse, classic, custom slot 0 and 1, interference, synthwave (see syncAnimate)
+	"\x07" + // modeSync: waves, pulse, classic, custom slot 0 and 1, interference, synthwave (see syncAnimate)
 	"\x05" + // modeBasic (numBasicPatterns)
 	"\x00" + // modeLast (not a mode)
 	"\x00" + // modeTest

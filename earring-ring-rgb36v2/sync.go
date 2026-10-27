@@ -79,12 +79,20 @@ var (
 	syncLocked    bool
 	syncSilent    bool
 
-	// State for the pulse variant (sync variant 0), updated in syncPoll once
+	// State for the pulse variant (sync variant 1), updated in syncPoll once
 	// per analysis frame and read per LED by syncAnimate.
 	syncNoiseT int // noise time: advances faster the louder the mids
 	syncBright int // 0..256: the beat's decay or the bass level, whichever is up
 
-	// Uploaded programs in sync mode (variants 2 and 3, see syncNextFrame).
+	// State for the waves variant (sync variant 0): per band - bass, mid,
+	// high, drawn red, green, blue - its average and its waves, updated in
+	// syncPoll once per analysis frame, and the picture they make, drawn
+	// there too (while the variant is shown) and read per LED by syncAnimate.
+	syncBands    [3]syncBand
+	syncWaves    [len(syncBands) * syncWaveSlots]syncWave // band i's from i*syncWaveSlots
+	syncWaveRing [numLEDs]Color
+
+	// Uploaded programs in sync mode (variants 3 and 4, see syncNextFrame).
 	syncSlot        int // custom slot loaded into animationBuf, plus one (0: none)
 	syncCustomFrame int // syncAnimFrame/2 at the program's last nextFrame
 
@@ -94,6 +102,27 @@ var (
 	syncRead    int   // next sample to consume from adcData
 	syncFed     int32 // samples fed into the current analysis frame
 )
+
+// The waves variant: a band rising above its own slow average spawns a wave
+// at the bar position, which runs both ways around the ring and fades.
+const (
+	syncWaveSlots = 4  // waves per band; a new one replaces the oldest
+	syncWaveLife  = 32 // frames a wave lasts (0.5 s), spreading half an LED per frame
+	syncWaveGap   = 8  // minimum frames between two waves of one band
+	syncWaveAvg   = 7  // the average's EMA shift: ~2 s at 64 frames/s
+)
+
+type syncWave struct {
+	birth       int32 // syncAnimFrame it spawned at
+	origin, amp uint8
+}
+
+type syncBand struct {
+	avg  int32 // the band's level, averaged, Q8 (an integer EMA at this shift sticks)
+	last int32 // syncAnimFrame of the band's last wave
+	up   bool  // the level was above avg last frame
+	next uint8 // slot of the band's next wave, 0..syncWaveSlots-1
+}
 
 // startSync resets the pipeline and starts DMA capture. Safe to call from any
 // mode: it configures clock, ADC, timer and DMA from scratch, like
@@ -108,6 +137,10 @@ func startSync() {
 	syncLocked = false
 	syncSilent = false
 	syncNoiseT = 0
+	// Waves from an earlier run would have births ahead of the restarted
+	// syncAnimFrame: ghosts once it caught up. (The bands' last spawns are
+	// ahead too: syncSpawnWave's unsigned gap test lets them through.)
+	syncWaves = [len(syncWaves)]syncWave{}
 	syncSlot = 0
 	syncShareReset(syncShareActive)
 	syncRead = 0
@@ -277,6 +310,92 @@ func syncPoll() {
 	syncNoiseT += 1 + int(sh.mid>>6)
 	k := int(256 - phase)
 	syncBright = 56 + max(k*k>>8, int(sh.bass))*200>>8
+
+	// Waves variant: each band rising above its average spawns a wave.
+	syncSpawnWave(0)
+	syncSpawnWave(1)
+	syncSpawnWave(2)
+	if modeVariants[modeSync] == 0 {
+		// The waves move once per frame, so they are drawn once per frame,
+		// and only while shown (the saved variant is the shown one in sync
+		// mode): drawing them per LED, in the pass that lights it, made the
+		// passes 20% longer than pulse's, and the LEDs as much dimmer.
+		syncDrawWaves()
+	}
+}
+
+// syncSpawnWave updates band i's average with its level, and when the level
+// rises above it spawns a wave at the bar position: beat 1 at the top (LED 0),
+// a quarter turn clockwise per beat. The wave is as bright as the level,
+// which rises at once (LevelRelease), so the rise is the hit's peak or near
+// it. Out of line: once for all three bands, and syncPoll has no registers to
+// spare.
+//
+// The bar is the beat tracker's: sh.beats counts the same beats as its
+// counter, both from 0 when sync starts, and it puts a bar on every fourth.
+// Before lock the onsets standing in for beats turn it.
+//
+//go:noinline
+func syncSpawnWave(i int) {
+	sh := syncShare
+	b := &syncBands[i]
+	x := (*[3]uint8)(unsafe.Pointer(&sh.bass))[i] // bass, mid, high: adjacent in the block
+	x8 := int32(x) << 8
+	up := x8 > b.avg
+	b.avg += (x8 - b.avg) >> syncWaveAvg
+	if up && !b.up && uint(syncAnimFrame-int(b.last)) >= syncWaveGap {
+		b.last = int32(syncAnimFrame)
+		syncWaves[i*syncWaveSlots+int(b.next)] = syncWave{
+			birth:  b.last,
+			origin: uint8(((sh.beats&3)<<8 + uint32(sh.beatPhase)) * numLEDs >> 10),
+			amp:    x,
+		}
+		b.next = (b.next + 1) % syncWaveSlots
+	}
+	b.up = up
+}
+
+// syncDrawWaves draws the waves variant into syncWaveRing. The waves of a
+// band add up, to at most 255.
+//
+//go:noinline
+func syncDrawWaves() {
+	syncWaveRing = [numLEDs]Color{}
+	ring := (*[numLEDs][4]uint8)(unsafe.Pointer(&syncWaveRing)) // red, green, blue
+	for i := range syncWaves {
+		for led := range numLEDs {
+			// A call in the loop: ARM's unroller leaves such loops alone.
+			p := &ring[led][i/syncWaveSlots]
+			*p = uint8(min(int(*p)+syncWaveLight(&syncWaves[i], led), 255))
+		}
+	}
+}
+
+// syncWaveLight is how much wave w lights LED led: its fronts are two LEDs
+// wide, at half an LED per frame from the origin both ways around the ring,
+// fading out over syncWaveLife.
+//
+//go:noinline
+func syncWaveLight(w *syncWave, led int) int {
+	age := syncAnimFrame - int(w.birth)
+	if uint(age) >= syncWaveLife {
+		return 0
+	}
+	d := led - int(w.origin)
+	if d < 0 {
+		d = -d
+	}
+	if d > numLEDs/2 {
+		d = numLEDs - d
+	}
+	e := 2*d - age // distance from the front, in half LEDs
+	if e < 0 {
+		e = -e
+	}
+	if e >= 4 {
+		return 0
+	}
+	return int(w.amp) * (syncWaveLife - age) * (4 - e) >> 7
 }
 
 var _ [numNoisePatterns - syncdsp.NumPatterns]struct{} // every pattern has a palette
@@ -291,13 +410,16 @@ var _ [numNoisePatterns - syncdsp.NumPatterns]struct{} // every pattern has a pa
 //
 // Variants:
 //
-//	0  pulse: the music-chosen palette, brightness on the beat and the bass,
+//	0  waves: red, green and blue waves for the bass, mids and highs, each
+//	   spawned by its band rising above its average, at a point going
+//	   around the ring once per bar (syncDrawWaves)
+//	1  pulse: the music-chosen palette, brightness on the beat and the bass,
 //	   flow speed from the mids, glitter from the highs
-//	1  classic: the music-chosen palette with a flash on each beat
-//	2  the uploaded program in custom slot 0, with the sync data block live
-//	3  the same for slot 1
-//	4  interference pulse (patterns.go)
-//	5  synthwave (patterns.go)
+//	2  classic: the music-chosen palette with a flash on each beat
+//	3  the uploaded program in custom slot 0, with the sync data block live
+//	4  the same for slot 1
+//	5  interference pulse (patterns.go)
+//	6  synthwave (patterns.go)
 //
 // A long press on the variant button swaps red and blue in all of them
 // (see animate).
@@ -306,16 +428,19 @@ var _ [numNoisePatterns - syncdsp.NumPatterns]struct{} // every pattern has a pa
 // checking earrings against each other (section hash as a color, a dot
 // chasing the beat); it is an uploadable program now, in SYNC-PROGRAMS.md.
 func syncAnimate(led, variant int) Color {
-	if variant&^1 == 2 {
-		return showCustom(led, syncMillis(), variant-2)
+	if uint(variant-3) < 2 {
+		return showCustom(led, syncMillis(), variant-3)
 	}
 
 	// The pipeline picks one of NumPatterns patterns from the spectrum (a
 	// pure function, identical on every device); the noise palettes give
-	// them visibly different looks. Pulse is tested first and the patterns
-	// last: these tests run for every LED, in the pass that lights them.
+	// them visibly different looks. Waves and pulse are tested first and the
+	// patterns last: these tests run for every LED, in the pass that lights
+	// them.
 	var c Color
 	if variant == 0 {
+		c = syncWaveRing[led]
+	} else if variant == 1 {
 		c = noise(led, syncNoiseT, syncVariant).Scale(syncBright)
 
 		// Glitter: up to 1 in 8 LEDs, more the louder the highs, each held
@@ -325,7 +450,7 @@ func syncAnimate(led, variant int) Color {
 		if h := syncShare.high; uint8(x>>24) < h>>3 {
 			c = NewColor(h, h, h)
 		}
-	} else if variant == 1 {
+	} else if variant == 2 {
 		c = noise(led, syncAnimFrame, syncVariant)
 		switch {
 		case !syncLocked:
@@ -364,14 +489,14 @@ func syncMillis() int {
 	return syncAnimFrame * 125 >> 3
 }
 
-// syncNextFrame runs once per main-loop frame in sync mode. For variants 2
-// and 3 it loads the uploaded program from that custom slot (on entering the
+// syncNextFrame runs once per main-loop frame in sync mode. For variants 3
+// and 4 it loads the uploaded program from that custom slot (on entering the
 // variant, with the same one-second grace as the custom modes) and calls its
 // nextFrame every other analysis frame: 32 times a second, near the ~27 of
 // the custom modes, so programs that count frames run at about their usual
 // speed. The program runs with the variant it last had in its custom mode.
 func syncNextFrame(variant int) {
-	slot := variant - 2
+	slot := variant - 3
 	if slot < 0 || slot > 1 {
 		return
 	}

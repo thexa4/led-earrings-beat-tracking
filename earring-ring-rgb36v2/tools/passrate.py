@@ -3,8 +3,8 @@
 
   tinygo build -tags passcount -o pc.elf -target=./stm32l0x1.json -opt=2 -panic=trap .
   tinygo build -tags passcount -o pc.bin -target=./stm32l0x1.json -opt=2 -panic=trap .
-  tools/passrate.py pc.elf [--modes 0-11] [--side L] [--seconds 10] [--settle 3]
-                    [--restore fw.bin]
+  tools/passrate.py pc.elf [--modes 0-11] [--variant 0] [--side L] [--seconds 10]
+                    [--settle 3] [--restore fw.bin]
 
 pc.bin must sit next to pc.elf. The LEDs are lit only while a pass refreshes
 them, for the same time every pass, so passes/s is how bright they are (and,
@@ -13,8 +13,9 @@ two builds mode by mode, on the same earring.
 
 For each mode the whole flash is written - the firmware, then the earring's
 own tail (both pattern slots, read once at the start) with a state page that
-boots into that mode, variant 0 - and after --settle seconds main.benchPasses
-is read over --seconds. A mode the firmware doesn't have boots into trace.
+boots into that mode, at --variant - and after --settle seconds
+main.benchPasses is read over --seconds. In sync mode variant 0 is waves and 1
+pulse. A mode the firmware doesn't have boots into trace.
 --restore writes that firmware and the original tail back at the end;
 otherwise the bench build is left running the last mode.
 """
@@ -52,10 +53,10 @@ def program(port, fw, tail, work):
         raise RuntimeError(f"program failed: {r[-300:]!r}")
 
 
-def with_mode(tail, mode):
+def with_mode(tail, mode, variant=0):
     st = bytearray(tail[STATE - TAIL:STATE - TAIL + 32])
     st[0] = mode
-    st[2 + mode] = 0
+    st[2 + mode] = variant
     st[28:32] = struct.pack("<I", hash32(bytes(st[:28])))
     return tail[:STATE - TAIL] + bytes(st) + tail[STATE - TAIL + 32:]
 
@@ -72,6 +73,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("elf")
     ap.add_argument("--modes", type=modes, default=modes("0-11"))
+    ap.add_argument("--variant", type=int, default=0)
     ap.add_argument("--side", choices=PORTS, default="L")
     ap.add_argument("--seconds", type=float, default=10)
     ap.add_argument("--settle", type=float, default=3)
@@ -87,7 +89,7 @@ def main():
     o.close()
     work = tempfile.mkdtemp(prefix="passrate-")
     for mode in a.modes:
-        program(port, fw, with_mode(tail, mode), work)
+        program(port, fw, with_mode(tail, mode, a.variant), work)
         time.sleep(a.settle)
         o = telem.OpenOCD("localhost", port)
         t0, n0 = time.time(), o.mdw(counter[0], 1)[0]

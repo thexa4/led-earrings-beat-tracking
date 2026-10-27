@@ -569,6 +569,13 @@ Measured 2026-10-27 on scream-rx (re-measure):
   instructions per pass); the most likely cause is `syncPoll` and `main` moving by
   4 bytes mod 8 in flash (1 wait state at 16 MHz) - an inference, not measured.
   Accepted: sync has ~3.6x the 667 passes/s it needs.
+- **Sync variant 0 is waves since the waves variant** (pulse moved to 1): `passrate.py`
+  measures mode 10 at `--variant` (default 0), so pulse numbers comparable with the
+  ones above need `--variant 1`. Evening L/R, R, 5897520 then waves: pulse 2366-2371
+  then 2351-2360, waves 3883-3886 passes/s; modes 0-9 and 11 within 0.1%. Waves draws
+  its ring once per analysis frame (`syncDrawWaves`, 432 short calls) and the LEDs only
+  read it; drawn per LED, in the pass that lights it, it ran 1880-1889 (20% dimmer
+  than pulse).
 - **What both microphones heard, frame by frame** (`tools/syncbands.py record`,
   `-tags syncboot`, `--elf` the image on the earrings): ~100 reads/s of the
   pipeline's band energies and comb state per earring, enough for every 64/s frame

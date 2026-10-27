@@ -15,24 +15,25 @@ pattern in the normal web editor; nothing about uploading changes.
 1. Upload your pattern to one of the two custom pattern modes as usual. If it
    has variants, pick the one you want there with the variant button.
 2. Press the mode button until you reach sync mode. It comes right after the
-   two custom pattern modes and starts with a colorful animation that pulses
-   with the music.
+   two custom pattern modes and starts with red, green and blue waves that
+   run round the ring with the music.
 3. Press the variant button to step through the sync mode variants:
 
    | variant | what it shows |
    |---|---|
-   | 1 | **pulse** (the default): the music's color scheme, flashing on the beat, brighter with the bass, flowing faster with the mids, with glitter on the highs |
-   | 2 | **classic**: the music's color scheme with a short flash on every beat |
-   | 3 | **your pattern** from the first custom mode, with the music data |
-   | 4 | **your pattern** from the second custom mode, with the music data |
-| 5 | **interference pulse**: two rainbow waves running around the ring at slightly different speeds, with a white flash on the beat that fades out until the next one |
-| 6 | **synthwave**: the ring strobes red and cyan, white for the first quarter of every beat |
+   | 1 | **waves** (the default): red, green and blue waves for the lows, mids and highs. A band starts a wave each time it gets louder than its own average, at a point that goes once round the ring per bar, and the wave runs both ways round the ring from there |
+   | 2 | **pulse**: the music's color scheme, flashing on the beat, brighter with the bass, flowing faster with the mids, with glitter on the highs |
+   | 3 | **classic**: the music's color scheme with a short flash on every beat |
+   | 4 | **your pattern** from the first custom mode, with the music data |
+   | 5 | **your pattern** from the second custom mode, with the music data |
+   | 6 | **interference pulse**: two rainbow waves running around the ring at slightly different speeds, with a white flash on the beat that fades out until the next one |
+   | 7 | **synthwave**: the ring strobes red and cyan, white for the first quarter of every beat |
 
 Hold the variant button for about a second to swap red and blue in every
 sync variant, your patterns included. Hold it again to swap them back. The
 earring remembers the swap when it is switched off.
 
-When you switch to variant 3 or 4 the earring waits about a second before
+When you switch to variant 4 or 5 the earring waits about a second before
 it starts your pattern, just like the custom pattern modes do. If a slot is
 empty you see a single blue LED.
 
