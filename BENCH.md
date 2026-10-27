@@ -537,6 +537,20 @@ Measured 2026-10-27 on scream-rx (re-measure):
   1.2 dB) while its idle level matches L's: less direct sound reaches R, the
   microphone hears the room. Only the right channel decodes at all - the left
   speaker reaches neither earring well enough.
+- **Writing a pattern slot over SWD erases the end of the firmware.** OpenOCD erases
+  this flash in 4 kB sectors (`flash info 0`), and the two pattern slots and the state
+  page share the last sector (0x08007000) with the firmware's tail, so `flash
+  write_image erase` of a slot wipes 0x08007000 up to the slot too. The firmware then
+  runs until it reaches the missing code and HardFaults (it looked like a crash in the
+  uploaded program). Write the whole flash instead - firmware, slot and state in one
+  image - as `tools/synccpu.py` does; `flash erase_address` refuses the 128-byte page
+  outright.
+- **CPU load in sync mode** (`tools/synccpu.py`, `-tags syncboot`, which counts loop
+  passes): the analysis takes ~9.4 M cycles/s (59%), a loop pass ~1230 cycles plus
+  three `getPixel` calls, and the pipeline falls behind below 667 passes/s - so about
+  2900 cycles per `getPixel`. Loss shows as frames/s under the earring's sample rate
+  / 250 (43/s with 16 divisions per pixel); the backlog is only a hint, as it is
+  sampled from the host.
 - **`pkill -f` in a one-line command** matches the command line it is part of when
   that line also contains what the pattern looks for (e.g. a `pkill -f "ssh .*-L
   4445:"` followed by the `ssh -L 4445:...` that reopens the tunnel kills its own

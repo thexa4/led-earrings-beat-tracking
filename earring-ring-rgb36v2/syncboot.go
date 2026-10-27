@@ -21,10 +21,18 @@ func syncBoot() {
 // reader; agreement at under 16000/s is the HSI16 clock.
 var syncWraps uint32
 
+// syncPolls counts main-loop passes, one syncPoll each, three LEDs drawn per
+// pass: the loop keeps up with the ADC while it makes 16000/syncFeedCap = 667
+// passes/s, so the pass rate is what an uploaded program's getPixel costs.
+// (The DMA backlog, what a long nextFrame costs, the host samples itself:
+// NDTR against syncRead. A max kept here did not fit in flash.)
+var syncPolls uint32
+
 func syncProbe() {
 	// Channel 1's TCIF is bit 1: TinyGo's DMA_ISR_TCIF1 is 0x20, channel 2's.
 	if stm32.DMA1.ISR.Get()&0x2 != 0 {
 		stm32.DMA1.IFCR.Set(0x2)
 		syncWraps++
 	}
+	syncPolls++
 }

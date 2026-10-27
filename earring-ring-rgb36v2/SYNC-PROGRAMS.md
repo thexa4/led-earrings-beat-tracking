@@ -181,13 +181,28 @@ changes: `millis` advances 37 per frame.
 
 ### Keep it fast
 
-In sync mode, listening to the music takes three quarters of the
-earring's processor. Your pattern shares what's left with the LEDs. If
-`getPixel` is slow, the earring misses parts of the music and gets worse at
-following the beat (the LEDs keep working).
+In sync mode, listening to the music takes about 60% of the earring's
+processor (16 MHz). Your pattern shares what's left with the LEDs. If it
+takes too much, the earring misses parts of the music and gets worse at
+following the beat and the other earrings (the LEDs keep working). Measured
+on the earrings:
+
+| | measured | to be safe, stay under |
+|---|---|---|
+| one `getPixel` call | fine up to ~2900 cycles (180 µs) | 2000 cycles |
+| one `nextFrame` call | fine at 60 000 cycles (4 ms); 185 000 lost 8% of the music | 60 000 cycles |
+| one division or `%` | a few hundred cycles each | |
+
+That is a lot of room for normal code: the three examples in
+`examples/sync/` take 60-100 cycles per `getPixel` and 5-8% of the
+processor. A loop that runs a few hundred times per pixel, or more than about
+five divisions per pixel, is where it starts to go wrong. A program that
+went over the limit with 16 divisions per pixel made the earring lose a third
+of the music.
 
 - Do slow work once per frame in `nextFrame`, store the result, and keep
-  `getPixel` short.
+  `getPixel` short. `getPixel` runs about 13 000 times a second, `nextFrame`
+  32 times.
 - Avoid division and `%` by anything other than a power of two. The
   processor has no divide instruction, so each one is a slow library call.
   Write `x * 455 >> 10` instead of `x * 16 / 36`, and `x & 3` instead of
