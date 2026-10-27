@@ -93,8 +93,7 @@ type Pipeline struct {
 	prevBass       int32
 	prevBass2      int32
 	bassFloor      int32
-	bassFlux       int32 // positive two-frame kick flux, the beat comb's input
-	bassOnset      bool  // debug: this frame's bass onset, for the replay trace
+	bassOnset      bool // debug: this frame's bass onset, for the replay trace
 	level          int32
 	linPeak        int32
 	onsetAge       int32 // frames since the last onset (100 = long ago)
@@ -174,6 +173,13 @@ type Pipeline struct {
 	lvlTop  int32 // the highest of lvlPeak, last frame
 	lvlN    int8  // NBands+1, see levels
 	Level   [NBands + 1]uint8
+
+	// The beat comb's input (BeatTracker.Tick): the sum over the bands (and
+	// the overall level) of the positive two-frame log2 flux. levels computes
+	// it because it already walks the bands; lvlHist holds the last two frames.
+	lvlHist  [2][NBands + 1]int16
+	beatFlux int32
+	lvlOff   int32 // gain step (Q8 log2) not yet applied to lvlPeak and lvlHist
 
 	frame  int32
 	events Events
@@ -398,6 +404,8 @@ func (p *Pipeline) agcUpdate() {
 		// The bass detector runs on one band, so one offset.
 		p.prevBass += off
 		p.prevBass2 += off
+		// The display levels' peaks and flux history: levels applies it.
+		p.lvlOff = off
 		// linPeak is a peak-hold of the *linear* sum, which scales with the
 		// gain directly. It is only ever compared against a linear sum of the
 		// same signal, so scaling it keeps the silence decision unchanged.
@@ -605,12 +613,14 @@ func (p *Pipeline) endFrame() Events {
 		p.stableFrames = 0
 	}
 
-	// 6. Beat tracker: advance phase, fold in the onset, possibly emit a beat
-	// boundary. Driven by the kick band, not the full-spectrum onset: see
-	// onsetDetectBass. Everything else in this function - the anchor, the
-	// energy gate, the pattern triggers - keeps reading the full-spectrum
-	// onset, because a section change is a broadband event.
-	beatBoundary, barBoundary := p.beat.Tick(p.bassOnset, p.bassFlux, p.frame)
+	// 6. Beat tracker: advance phase, fold in the flux, possibly emit a beat
+	// boundary. Locked, the phase comes from the all-band flux comb (see
+	// Tick); before lock, kick-band onsets stand in for beats (see
+	// onsetDetectBass - the full-spectrum onset there costs two TestAgreement
+	// cases). Everything else in this function - the anchor, the energy gate,
+	// the pattern triggers - keeps reading the full-spectrum onset, because a
+	// section change is a broadband event.
+	beatBoundary, barBoundary := p.beat.Tick(p.bassOnset, p.beatFlux, p.frame)
 
 	// The events struct is state across frames, so it is rebuilt from scratch
 	// every frame: a stale Hash here once made every frame look identical.
@@ -711,14 +721,20 @@ func (p *Pipeline) endFrame() Events {
 //
 //go:noinline
 func (p *Pipeline) levels(e *[NBands]int32, all int32) {
-	floor := p.lvlTop - RelFloorQ8
+	off := p.lvlOff // a gain step since the last frame (see feed)
+	p.lvlOff = 0
+	floor := p.lvlTop + off - RelFloorQ8
 	top := int32(-1 << 30)
+	flux := int32(0)
 	for i := range p.lvlN {
 		v := all
 		if i < NBands {
 			v = e[i]
 		}
-		pk := max(p.lvlPeak[i]-LevelPeakDecayQ8, v)
+		flux += max(v-int32(p.lvlHist[1][i])-off, 0)
+		p.lvlHist[1][i] = p.lvlHist[0][i] + int16(off)
+		p.lvlHist[0][i] = int16(v)
+		pk := max(p.lvlPeak[i]+off-LevelPeakDecayQ8, v)
 		p.lvlPeak[i] = pk
 		top = max(top, pk)
 		x := (v - max(pk, floor) + LevelRangeQ8) >> LevelShift
@@ -729,6 +745,7 @@ func (p *Pipeline) levels(e *[NBands]int32, all int32) {
 		p.Level[i] = uint8(x)
 	}
 	p.lvlTop = top
+	p.beatFlux = flux
 }
 
 // pushEnv stores this frame's loudness in the tempo ring, relative to the
@@ -977,7 +994,6 @@ func (p *Pipeline) onsetDetect(total int32) bool {
 //go:noinline
 func (p *Pipeline) onsetDetectBass(bass int32) bool {
 	flux := bass - p.prevBass2
-	p.bassFlux = max(flux, 0)
 	absFlux := flux
 	if absFlux < 0 {
 		absFlux = -absFlux
@@ -1473,7 +1489,7 @@ type BeatTracker struct {
 	// rather than 32: onset intervals turned out to say nothing about tempo.
 	ev     [BeatMaxPeriod - BeatMinPeriod + 1]int16
 	evInit bool
-	// comb is the leaky average kick flux at each position in the beat cycle;
+	// comb is the leaky average onset flux at each position in the beat cycle;
 	// pos is the position in Q8 frames (perQ8 the fractional period), best the
 	// bin with the most flux, where the beat goes. since counts frames since
 	// the last beat.
@@ -1484,19 +1500,22 @@ type BeatTracker struct {
 	since int32
 }
 
-// Tick advances the beat cycle by one frame and folds in this frame's kick
-// flux x (>= 0, Q8 log2) and onset. It returns (beatBoundary, barBoundary) for
-// this frame.
+// Tick advances the beat cycle by one frame and folds in this frame's onset
+// flux x (>= 0, Q8 log2; Pipeline.beatFlux) and onset. It returns
+// (beatBoundary, barBoundary) for this frame.
 //
-// Locked, the beat goes where the comb holds the most kick flux. The comb
-// replaced a phase-locked loop that pulled the grid toward each bass onset:
-// those onsets are as often a bass note or a fill as a kick, and every one of
-// them moved the grid, so two earrings rarely agreed on where the beat was.
-// Averaged over eight beats the kick wins. Measured against a kick-based
-// reference (librosa's tracker on the mel bands below 200 Hz) on three
-// 10-minute stretches of an EDM set, through the four device scenarios: beats
-// within 70 ms of a kick 31% -> 56%, both earrings' beats within 32 ms of each
-// other 39% -> 73% (beat_eval_test.go).
+// Locked, the beat goes where the comb holds the most flux. The comb replaced
+// a phase-locked loop that pulled the grid toward each bass onset: those
+// onsets are as often a bass note or a fill as a kick, and every one of them
+// moved the grid, so two earrings rarely agreed on where the beat was.
+// Averaged over eight beats the kick wins. The flux is summed over all bands,
+// not taken from the bass band alone: the kick's click reaches up the
+// spectrum and an off-beat bass note does not, so fewer grids settle on the
+// off-beat. Measured against a kick-based reference (librosa's tracker on the
+// mel bands below 200 Hz) on three 10-minute stretches of an EDM set, through
+// the four device scenarios: beats within 70 ms of a kick 31% -> 60%, both
+// earrings' beats within 32 ms of each other 39% -> 82% (beat_eval_test.go;
+// bass-band flux alone: 56%, 73%).
 //
 //go:noinline
 func (b *BeatTracker) Tick(onset bool, x int32, frame int32) (bool, bool) {

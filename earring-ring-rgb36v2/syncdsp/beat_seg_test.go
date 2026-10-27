@@ -58,7 +58,7 @@ func TestBeatSeg(t *testing.T) {
 			win[i] = uint16(int32(src[n*Window+i])/4 + benchDC)
 		}
 		p.Process(win)
-		fold(&flux, float64(n+1)*Window/16000, float64(p.bassFlux))
+		fold(&flux, float64(n+1)*Window/16000, float64(p.beatFlux))
 	}
 	norm := func(f [16]float64) []int {
 		mx := 0.0

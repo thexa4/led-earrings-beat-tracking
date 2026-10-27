@@ -184,7 +184,10 @@ func syncPoll() {
 	// exactly Window samples: the rest wait for the next call. (Feeding the
 	// whole backlog made every frame 250 plus up to the cap, ~1 % long on
 	// average and different each frame; measured with -tags syncboot.)
-	avail := (write - syncRead + syncWindowSize) % syncWindowSize
+	avail := write - syncRead
+	if avail < 0 {
+		avail += syncWindowSize
+	}
 	avail = min(avail, syncFeedCap, syncdsp.Window-int(syncFed))
 
 	for range avail {
@@ -221,7 +224,9 @@ func syncPoll() {
 	if ev.PatternChanged {
 		// Map pattern -> palette here rather than per LED in syncAnimate:
 		// animate runs 36 times per frame, patterns change once per bar.
-		syncVariant = int(ev.Pattern) % numNoisePatterns
+		// Patterns are 0..NumPatterns-1, all below numNoisePatterns (checked
+		// below), so no modulo: a signed one pulled in a 60 B library call.
+		syncVariant = int(ev.Pattern)
 	}
 	syncLocked = ev.Locked
 	syncSilent = ev.Silent
@@ -271,6 +276,8 @@ func syncPoll() {
 	k := int(256 - phase)
 	syncBright = 56 + max(k*k>>8, int(sh.bass))*200>>8
 }
+
+var _ [numNoisePatterns - syncdsp.NumPatterns]struct{} // every pattern has a palette
 
 // syncAnimate draws one LED for party sync mode.
 //

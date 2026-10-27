@@ -385,8 +385,9 @@ where the beat was.
   4 s every 2 s, evidence accumulated per lag; the period is the peak lag,
   refined to Q8 frames by the parabola through it and its neighbours
   (143 BPM is 26.85 frames).
-* **Phase** — a beat comb in `Tick`: the positive two-frame flux of the bottom
-  band (the kick), leaky-averaged (8 beats) into one bin per frame of the beat
+* **Phase** — a beat comb in `Tick`: the positive two-frame log flux summed
+  over the bands (the kick's click reaches up the spectrum, an off-beat bass
+  note does not), leaky-averaged (8 beats) into one bin per frame of the beat
   cycle; the beat fires on the bin with the most flux, with a half-period
   refractory. `beat` is a *monotonic* counter — nothing ever resets it (a reset
   shifts one device's ring against the others').
@@ -394,8 +395,8 @@ where the beat was.
   tracker on the mel bands below 200 Hz; librosa's full-band tracker sits on
   the off-beat hats half the time on this music) over three 10-minute
   stretches of an EDM set and four device-pair scenarios: beats within 70 ms
-  of a kick 31% → 56%, the two earrings' beats within 32 ms of each other
-  39% → 73%. Pattern agreement unchanged.
+  of a kick 31% → 60%, the two earrings' beats within 32 ms of each other
+  39% → 82%. Pattern agreement unchanged.
 
 Budget ~100 cycles/frame plus the scan, ~220 B RAM.
 
