@@ -397,6 +397,29 @@ where the beat was.
   stretches of an EDM set and four device-pair scenarios: beats within 70 ms
   of a kick 31% → 60%, the two earrings' beats within 32 ms of each other
   39% → 82%. Pattern agreement unchanged.
+* **On the bench** (2026-10-27, both earrings on `-tags syncboot`, podcast
+  20:00 and 40:00 through the room speaker, `tools/syncpoll.py` +
+  `syncpair.py` + `synckick.py`): both lock 100% of the time at the right
+  tempo, but beats within 32 ms of the other earring are 21% / 24% for the
+  PLL and **44% / 12%** for the comb (chance 13-18%). The PLL never holds a
+  phase - its grid drifts through every bin of the other's. The comb holds a
+  phase for minutes, but at 40:00 the right earring held the *off-beat* the
+  whole run while the left sat on the kick 70% of the time. There the bass
+  and low mids peak on the off-beat bassline in *both* microphones, and only
+  the top bands mark the kick - which the left earring hears clearly and the
+  right hardly at all (its top bands carry 3-6x less musical modulation; it
+  gets less direct sound from the speaker, see the scream test in BENCH.md
+  §14). The host scenarios never give one earring a noisy top end, which is
+  why they promised 82%.
+  Nulls: the LEDs' beat pulse does not feed back into the earring's own
+  bands (no peak at its own beat phase, old or new firmware). Flux from
+  bands 3-7 only (below ~1.6 kHz, no total) scored 39% / 25% - inside the
+  run-to-run noise, not kept. Pattern agreement swings 37-83% between runs
+  of the *same* firmware (5-8 changes per 5 min), so one run says nothing
+  about it.
+  Next: a phase choice both earrings make from what they hear alike, e.g.
+  prefer the bin where the lowest band rises most; tune it on screamdump-style
+  recordings of both microphones, which the host replay can then reproduce.
 
 Budget ~100 cycles/frame plus the scan, ~220 B RAM.
 

@@ -512,3 +512,32 @@ Things that made recordings lie, measured once (2026-10, re-measure):
   every session, so a reader must skip lines that are not its own reply.
 - The decoder agreed bit for bit with the host over SWD (`TestFeedTarget`, headphone
   and spk10cmR, ~400 windows each).
+
+## 14. Sync and upload checks with the main checkout's tools
+
+Measured 2026-10-27 on scream-rx (re-measure):
+
+- **Sync, no ELF needed.** `tools/syncpoll.py` reads the sync data block at its
+  fixed address (`0x20001fc0`, `syncshare.go`) on both earrings, one thread each,
+  every read stamped with the shared host clock; `syncpair.py` scores health, lock
+  and L/R beat coincidence, `synckick.py` places each earring's beats on a kick
+  reference of the played file (`tools/beatref/kbeats.py`). Beat times come from
+  `t - beatAge/frame rate`, earliest per beat count, so they are good to a few ms
+  without any device-clock fit. Flash `-tags syncboot` so the earrings boot into
+  sync; restart the OpenOCD servers after the flash.
+- **The speaker is ~2.25 s late** (AirPlay), the same for both earrings in every run.
+  `synckick.py` finds it by correlating each earring's bass level with the file and
+  reports both, which is the check that the alignment is real.
+- **Upload: L decodes, R does not.** With `-tags screamtelem` and a pattern encoded
+  by `scream/tools/screamcheck`, L received every copy correctly (first after 16 s,
+  then every 1.4-6 s; `tools/hash32.py` gives the hash to expect). R synced but never
+  decoded a header, with both channels, the left only, or the right only. Its
+  screamdump recording replays to the same result on the host (`TestReplay`, tone
+  eye ~0.7 vs L's ~2.3, 23.5% vs 3.7% bit errors, previous-symbol echo 4.8 vs
+  1.2 dB) while its idle level matches L's: less direct sound reaches R, the
+  microphone hears the room. Only the right channel decodes at all - the left
+  speaker reaches neither earring well enough.
+- **`pkill -f` in a one-line command** matches the command line it is part of when
+  that line also contains what the pattern looks for (e.g. a `pkill -f "ssh .*-L
+  4445:"` followed by the `ssh -L 4445:...` that reopens the tunnel kills its own
+  shell). Run the pkill as a command of its own.
