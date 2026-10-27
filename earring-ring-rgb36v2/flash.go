@@ -13,6 +13,8 @@ import (
 	"runtime/interrupt"
 	"runtime/volatile"
 	"unsafe"
+
+	"github.com/aykevl/things/earring-ring-rgb36v2/rolled"
 )
 
 const (
@@ -73,6 +75,7 @@ func flashErasePages(addr uintptr, count int) {
 	stm32.FLASH.PECR.Set(stm32.Flash_PECR_ERASE | stm32.Flash_PECR_PROG)
 
 	for i := 0; i < count; i++ {
+		rolled.Loop()
 		a := addr + uintptr(i)*flashPageSize
 		// To erase, write any value to somewhere in that page.
 		(*volatile.Register32)(unsafe.Pointer(a)).Set(uint32(a))
@@ -92,6 +95,7 @@ func flashWrite(addr uintptr, p []byte) {
 	// plus its length checks cost more than they saved).
 	words := unsafe.Slice((*uint32)(unsafe.Pointer(unsafe.SliceData(p))), len(p)/4)
 	for i := 0; i < len(words); i++ {
+		rolled.Loop()
 		(*volatile.Register32)(unsafe.Pointer(addr + uintptr(i)*4)).Set(words[i])
 	}
 	flashLock()

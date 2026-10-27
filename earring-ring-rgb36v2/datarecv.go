@@ -5,6 +5,7 @@ import (
 	"machine"
 	"unsafe"
 
+	"github.com/aykevl/things/earring-ring-rgb36v2/rolled"
 	"github.com/aykevl/things/earring-ring-rgb36v2/screamrx"
 )
 
@@ -130,20 +131,11 @@ func adcWritten() uint32 {
 func adcNextWindow() bool {
 	for adcWritten() < adcRead+windowSize {
 	}
+	// The window is at most two straight runs of the ring: up to its end,
+	// then from its start.
 	src := adcRead % uint32(len(adcData))
-	dc := int32(dcOffset)
-	gain := decoder.Gain()
-	sum := uint32(0)
-	for i := range windowSize {
-		v := uint32(adcData[src])
-		src++
-		if src == uint32(len(adcData)) {
-			src = 0
-		}
-		adcDataNormalized[i] = (int32(v) - dc) >> gain
-		sum += v
-	}
-	dcOffset = sum / windowSize
+	n := min(windowSize, uint32(len(adcData))-src)
+	dcOffset = (normalize(0, src, n) + normalize(n, 0, windowSize-n)) / windowSize
 	ok := adcWritten() <= adcRead+uint32(len(adcData))
 	adcRead += windowSize
 	if !ok {
@@ -151,6 +143,26 @@ func adcNextWindow() bool {
 		adcRead = adcWritten() - windowSize
 	}
 	return ok
+}
+
+// normalize copies n samples from adcData[src:] to adcDataNormalized[dst:],
+// less the DC offset and shifted right by the decoder's gain, and returns
+// their sum. One rolled loop for both runs of a window: one loop over the
+// ring, with the wrap check in every step, was 456 bytes unrolled, and 30%
+// more instructions per sample rolled.
+//
+//go:noinline
+func normalize(dst, src, n uint32) uint32 {
+	out := adcDataNormalized[dst : dst+n]
+	dc := int32(dcOffset)
+	gain := decoder.Gain()
+	sum := uint32(0)
+	for i, v := range adcData[src : src+n] {
+		rolled.Loop()
+		out[i] = (int32(v) - dc) >> gain
+		sum += uint32(v)
+	}
+	return sum
 }
 
 // setIndicatorPin is Pin.Configure for the A1-A12 pins (all on GPIOA, whose

@@ -40,10 +40,10 @@ package main
 //     (log2/hash/beat/decide, ~2k cycles) runs at once.
 
 import (
-	"device/arm"
 	"device/stm32"
 	"unsafe"
 
+	"github.com/aykevl/things/earring-ring-rgb36v2/rolled"
 	"github.com/aykevl/things/earring-ring-rgb36v2/syncdsp"
 )
 
@@ -182,15 +182,15 @@ func startSync() {
 //go:noinline
 func waitForVOS() {
 	for i := 0; i < 100000 && stm32.PWR.CSR.Get()&stm32.PWR_CSR_VOSF_Msk != 0; i++ {
-		// Emits nothing, but counts as a call: ARM's unroller leaves such
-		// loops alone (unrolled 4x, this loop took 24 bytes more).
-		arm.Asm("")
+		rolled.Loop() // unrolled 4x, this loop took 24 bytes more
 	}
 }
 
 // stopSync tears down everything startSync turned on, restoring the low-power
 // clock state (mirrors the teardown half of dataRecv, minus the LED handling
-// - the LEDs were never stopped here).
+// - the LEDs were never stopped here). One copy for main's two calls.
+//
+//go:noinline
 func stopSync() {
 	if !syncRunning {
 		return
