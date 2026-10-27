@@ -357,6 +357,12 @@ func median5(a, b, c, d, e int32) int32 {
 // the sample count per symbol, in 1/256 samples (200*256/(PSC+1)), or 0
 // when the clock cannot be trimmed.
 func (d *Decoder) Initialize(data []uint32, maxMessageSize, sampleRate int, trimStep int) {
+	// From zero: the firmware keeps the decoder in the sync pipeline's
+	// memory, and the first receive after sync mode began with the
+	// pipeline's data as its clock trim (6 PSC steps on the bench) and
+	// impulse thresholds (~1e9, for seconds), and failed. The statistics
+	// count across messages (screamtelem).
+	clear(unsafe.Slice((*byte)(unsafe.Pointer(d)), unsafe.Offsetof(d.Stats)))
 	d.samplesPerSymbol = int32(sampleRate / datatrans.SymbolsPerSecond)
 	d.fountain.Data = data
 	d.maxMessageSize = uint16(min(maxMessageSize, len(data)*4))
@@ -365,7 +371,6 @@ func (d *Decoder) Initialize(data []uint32, maxMessageSize, sampleRate int, trim
 	if sampleRate != 10000 {
 		panic("screamrx: sample rate")
 	}
-	d.messageHash = 0
 	d.Reset()
 }
 

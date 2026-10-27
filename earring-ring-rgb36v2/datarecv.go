@@ -226,7 +226,7 @@ func dataRecv(slot int) {
 }
 
 func receiveData(slot int) {
-	decoder.Reset()
+	// No decoder.Reset(): dataRecv's Initialize, just before, ends with one.
 
 	button2WasReleased := false // true once button 2 was released once (for exiting the receiver)
 	whiteWasOn := false         // used for blinking LED
