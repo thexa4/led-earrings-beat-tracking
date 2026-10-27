@@ -458,6 +458,9 @@ const (
 	TempoEvidenceShift = 3
 	// BeatRefractoryFrames: minimum spacing between onsets (~125 ms).
 	BeatRefractoryFrames = 15
+	// BeatCombShift is the leak of the beat comb, per visit (per beat): 3 is
+	// eight beats, about 3.5 s at 140 BPM.
+	BeatCombShift = 3
 )
 
 // Display levels (Pipeline.Level): per-band loudness scaled to 0..255 for the

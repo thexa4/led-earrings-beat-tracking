@@ -93,7 +93,8 @@ type Pipeline struct {
 	prevBass       int32
 	prevBass2      int32
 	bassFloor      int32
-	bassOnset      bool // debug: this frame's bass onset, for the replay trace
+	bassFlux       int32 // positive two-frame kick flux, the beat comb's input
+	bassOnset      bool  // debug: this frame's bass onset, for the replay trace
 	level          int32
 	linPeak        int32
 	onsetAge       int32 // frames since the last onset (100 = long ago)
@@ -462,7 +463,7 @@ func (p *Pipeline) endFrame() Events {
 			p.linPeak = LoudMinFloor
 		}
 	}
-	p.silent = linear < p.linPeak/SilenceDiv
+	p.silent = linear < int32(uint32(p.linPeak)/SilenceDiv)
 
 	p.levels(&e, log2e(uint32(linear)))
 
@@ -609,7 +610,7 @@ func (p *Pipeline) endFrame() Events {
 	// onsetDetectBass. Everything else in this function - the anchor, the
 	// energy gate, the pattern triggers - keeps reading the full-spectrum
 	// onset, because a section change is a broadband event.
-	beatBoundary, barBoundary := p.beat.Tick(p.bassOnset, p.frame)
+	beatBoundary, barBoundary := p.beat.Tick(p.bassOnset, p.bassFlux, p.frame)
 
 	// The events struct is state across frames, so it is rebuilt from scratch
 	// every frame: a stale Hash here once made every frame look identical.
@@ -692,7 +693,7 @@ func (p *Pipeline) endFrame() Events {
 	// itself. This is what decides the period; the interval histogram above
 	// only provides the early beats before the ring is full.
 	p.pushEnv(total)
-	if p.frame%TempoStep == TempoStep-1 {
+	if uint32(p.frame)%TempoStep == TempoStep-1 {
 		p.tempoScan()
 	}
 
@@ -869,7 +870,7 @@ func (p *Pipeline) tempoScan() {
 	// within a frame, and a knife-edge win on one bin over its neighbour is
 	// exactly the tie two devices would split - normalise by the envelope's own
 	// variance, and fold into the running evidence.
-	step := energy / TempoScale
+	step := int32(uint32(energy) / TempoScale) // energy >= TempoScale here
 	best := 0
 	bestEv := int32(-1 << 30)
 	for k := 0; k < nLag; k++ {
@@ -888,7 +889,7 @@ func (p *Pipeline) tempoScan() {
 		// and mislocated the peak, 1800 lost lock and 2700 jumped to lag 46. The
 		// envelope is already a smooth loudness curve; differencing it into a
 		// spike train throws away the periodicity the scan depends on. REVERTED.)
-		sm := (prev + 2*cur + next) / 4
+		sm := (prev + 2*cur + next) >> 2
 		prev, cur = cur, next
 		q := sm / step
 		// |q| <= TempoScale by Cauchy-Schwarz - a correlation of a signal with a
@@ -915,16 +916,23 @@ func (p *Pipeline) tempoScan() {
 	}
 	period := BeatMinPeriod + int32(best)
 	b.Period = period
-	if !b.Locked {
-		// Start the fresh grid at a beat; the phase-locked loop in Tick pulls it
-		// onto the kicks from here within a few beats. The earlier version set
-		// the phase by picking the loudest of the Period comb positions in the
-		// envelope, but measured against the device's own loudness that landed
-		// the beat on the loud frame no better than a fixed phase did (both
-		// ~chance), and cost a nested loop over the ring - the PLL tracking the
-		// onsets does the job for free.
-		b.phase = 0
+	// The fractional period: the vertex of the parabola through the evidence
+	// at best and its neighbours. 143 BPM is 26.85 frames; a whole-frame period
+	// walks the grid off the kicks by a frame every seven beats.
+	perQ8 := period << 8
+	if best > 0 && best < nLag-1 {
+		l, c, r := int32(b.ev[best-1]), bestEv, int32(b.ev[best+1])
+		if den := 2*c - l - r; den > 0 {
+			perQ8 += (r - l) * 128 / den
+		}
 	}
+	// pos may now be past the end of a shorter cycle; Tick's subtraction brings
+	// it back within a few frames, and the comb has room for the longest period.
+	b.perQ8 = perQ8
+	// The comb starts empty at lock and fills within a few beats. (Locking used
+	// to set a starting phase - first the loudest comb position in the
+	// envelope, then a fixed one - and both were ~chance: the comb in Tick does
+	// that job from the kick flux.)
 	b.Locked = true
 }
 
@@ -969,6 +977,7 @@ func (p *Pipeline) onsetDetect(total int32) bool {
 //go:noinline
 func (p *Pipeline) onsetDetectBass(bass int32) bool {
 	flux := bass - p.prevBass2
+	p.bassFlux = max(flux, 0)
 	absFlux := flux
 	if absFlux < 0 {
 		absFlux = -absFlux
@@ -1445,12 +1454,11 @@ func log2e(v uint32) int32 {
 	return int32(n)<<8 | int32(frac)
 }
 
-// BeatTracker keeps a beat phase locked to the music using onset intervals,
+// BeatTracker keeps a beat phase locked to the kicks (see Tick),
 // so that the hash ring can be indexed by musical position (§D3).
 type BeatTracker struct {
 	Locked bool
 	Period int32 // beat period in analysis frames, valid when Locked
-	phase  int32 // 0..Period-1
 	beat   int32 // monotonic beat count since lock; the ring index
 	bar    int32
 	// lastOnset is the frame of the previous onset, which is what the
@@ -1465,69 +1473,65 @@ type BeatTracker struct {
 	// rather than 32: onset intervals turned out to say nothing about tempo.
 	ev     [BeatMaxPeriod - BeatMinPeriod + 1]int16
 	evInit bool
+	// comb is the leaky average kick flux at each position in the beat cycle;
+	// pos is the position in Q8 frames (perQ8 the fractional period), best the
+	// bin with the most flux, where the beat goes. since counts frames since
+	// the last beat.
+	comb  [BeatMaxPeriod + 1]int16
+	perQ8 int32
+	pos   int32
+	best  int32
+	since int32
 }
 
-// Tick advances the phase by one frame and folds in the onset. It returns
-// (beatBoundary, barBoundary) for this frame.
+// Tick advances the beat cycle by one frame and folds in this frame's kick
+// flux x (>= 0, Q8 log2) and onset. It returns (beatBoundary, barBoundary) for
+// this frame.
+//
+// Locked, the beat goes where the comb holds the most kick flux. The comb
+// replaced a phase-locked loop that pulled the grid toward each bass onset:
+// those onsets are as often a bass note or a fill as a kick, and every one of
+// them moved the grid, so two earrings rarely agreed on where the beat was.
+// Averaged over eight beats the kick wins. Measured against a kick-based
+// reference (librosa's tracker on the mel bands below 200 Hz) on three
+// 10-minute stretches of an EDM set, through the four device scenarios: beats
+// within 70 ms of a kick 31% -> 56%, both earrings' beats within 32 ms of each
+// other 39% -> 73% (beat_eval_test.go).
 //
 //go:noinline
-func (b *BeatTracker) Tick(onset bool, frame int32) (bool, bool) {
-	beatBoundary := false
+func (b *BeatTracker) Tick(onset bool, x int32, frame int32) (bool, bool) {
 	barBoundary := false
-
 	if onset {
 		b.lastOnset = frame
 	}
-
+	// Before lock, onsets act as (irregular) beats so the hash ring still
+	// fills and anchors can fire on songs with sparse kicks.
+	beatBoundary := onset
 	if b.Locked {
-		b.phase++
-		if b.phase >= b.Period {
-			b.phase = 0
-			b.beat++
-			beatBoundary = true
-			if b.beat%BeatsPerBar == 0 {
-				b.bar++
-				barBoundary = true
-			}
+		b.pos += 256
+		if b.pos >= b.perQ8 {
+			b.pos -= b.perQ8
 		}
-		// Phase-locked loop: pull the phase toward the onset so drift between the
-		// local clock and the music is corrected continuously. The period comes
-		// from the envelope scan and can be a frame or two off the true tempo
-		// (143 BPM is 26.9 frames), which over a minute is a whole beat of
-		// drift; this is what keeps a locked grid on the kicks instead.
-		if onset {
-			d := b.phase
-			if d > b.Period/2 {
-				d -= b.Period
-			}
-			// d in (-Period/2, Period/2]: how far we are past (or before) the
-			// nearest beat. Correct a quarter of it, with a one-frame minimum |step|
-			// so small errors do not get stuck.
-			step := d >> 2
-			if step == 0 {
-				if d > 0 {
-					step = 1
-				} else {
-					step = -1
-				}
-			}
-			b.phase -= step
-			if b.phase < 0 {
-				// Stepped back through the boundary: emit it here rather than losing
-				// the beat.
-				b.phase += b.Period
-				b.beat++
-				beatBoundary = true
-			} else if b.phase >= b.Period {
-				b.phase -= b.Period
-				b.beat--
-			}
+		bin := b.pos >> 8
+		// x is a log2 ratio in Q8, at most 32<<8, so the average fits int16.
+		c := int32(b.comb[bin])
+		c += (x - c) >> BeatCombShift
+		b.comb[bin] = int16(c)
+		if c > int32(b.comb[b.best]) {
+			b.best = bin
 		}
-	} else if onset {
-		// Before lock, onsets act as (irregular) beats so the hash ring still
-		// fills and anchors can fire on songs with sparse kicks.
+		// The refractory keeps a move of the best bin from putting two beats in
+		// one cycle.
+		b.since++
+		beatBoundary = bin == b.best && b.since*2 >= b.Period
+	}
+	if beatBoundary {
+		b.since = 0
 		b.beat++
-		beatBoundary = true
+		if b.Locked && uint32(b.beat)%BeatsPerBar == 0 {
+			b.bar++
+			barBoundary = true
+		}
 	}
 	return beatBoundary, barBoundary
 }

@@ -373,17 +373,31 @@ bits, adjacent-section identity distance ≥ 6 bits.
 
 ### Stage 5 — Beat tracker
 
-*As built* — Dixon/McKinley-style onset-interval histogram:
+*As first built* — Dixon/McKinley-style onset-interval histogram plus a phase
+PLL that nudged the phase toward each onset. Both were replaced: onset
+intervals carry no tempo (see `tempoScan`), and bass onsets are as often a bass
+note or a fill as a kick, so the PLL wandered and two earrings rarely agreed on
+where the beat was.
 
-* `onset` = log-domain frame-energy flux above a leaky floor
-  (`flux > floor + floor/2 + 48`), 125 ms refractory.
-* On onset, `τ = t − t_prev` votes with weights 4/τ (exact), 3/τ·2 (half),
-  2/τ/2 (double) into an interval histogram; lock after 8 supporting onsets.
-* Phase PLL: each onset nudges `phase` by `error >> 2` (min 1), so the count
-  tracks the music instead of free-running. `beat` is a *monotonic* counter —
-  nothing ever resets it (a reset shifts one device's ring against the others').
+*As built now:*
 
-Budget ~300 cycles/onset, ~120 B RAM.
+* **Period** — `tempoScan`: autocorrelation of the loudness envelope over
+  4 s every 2 s, evidence accumulated per lag; the period is the peak lag,
+  refined to Q8 frames by the parabola through it and its neighbours
+  (143 BPM is 26.85 frames).
+* **Phase** — a beat comb in `Tick`: the positive two-frame flux of the bottom
+  band (the kick), leaky-averaged (8 beats) into one bin per frame of the beat
+  cycle; the beat fires on the bin with the most flux, with a half-period
+  refractory. `beat` is a *monotonic* counter — nothing ever resets it (a reset
+  shifts one device's ring against the others').
+* Measured with `beat_eval_test.go` against a kick reference (librosa's DP
+  tracker on the mel bands below 200 Hz; librosa's full-band tracker sits on
+  the off-beat hats half the time on this music) over three 10-minute
+  stretches of an EDM set and four device-pair scenarios: beats within 70 ms
+  of a kick 31% → 56%, the two earrings' beats within 32 ms of each other
+  39% → 73%. Pattern agreement unchanged.
+
+Budget ~100 cycles/frame plus the scan, ~220 B RAM.
 
 ### Stage 6 — The two roles
 

@@ -53,9 +53,9 @@ func TestReplayWav(t *testing.T) {
 			p.total, ev.Hash, ev.Anchor, p.smooth[NBands-1],
 			p.env[(p.envHead-1)&EnvMask]))
 		if ev.Onset && ev.Locked {
-			// After lock, show phase error vs onset: is the PLL tracking?
-			fmt.Printf("t=%5.1f onset phase=%d period=%d\n",
-				float64(f)/fps, p.beat.phase, p.beat.Period)
+			// After lock, show where in the beat cycle onsets land.
+			fmt.Printf("t=%5.1f onset pos=%d best=%d period=%d\n",
+				float64(f)/fps, p.beat.pos>>8, p.beat.best, p.beat.Period)
 		}
 		if ev.Onset {
 			prevOnsets++

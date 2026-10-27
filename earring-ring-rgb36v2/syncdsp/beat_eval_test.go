@@ -2,21 +2,27 @@ package syncdsp
 
 // Beat tracking measured against the music and between two earrings.
 //
-// The reference beat grid comes from an offline float tracker that sees the
-// whole file (Ellis 2007, "Beat tracking by dynamic programming": an onset
-// envelope at 250 Hz, tempo per 20 s window from its autocorrelation, then
-// the best beat sequence by dynamic programming). It is a reference, not the
-// truth, but it is independent of everything in this package, and on four-
-// on-the-floor music it is a much easier problem offline than causally in
-// 2k cycles a frame.
+// The reference beat grid should come from a file: BEATREFDIR/<name>.beats,
+// one beat time in seconds per line, made by tools/beatref/kbeats.py -
+// librosa's dynamic-programming tracker (Ellis 2007) on an onset envelope from
+// the mel bands below 200 Hz, so the beat is the kick. librosa's own full-band
+// envelope puts the beat on the off-beat hats about half the time on the EDM
+// set used here (the low band's energy peaks half a beat after its beats),
+// which is why the kick version is the reference.
+//
+// Without a file, refBeats builds a grid itself (the same DP on a 4 ms
+// low-band plus full-band log flux). Do not trust it: at 4 ms hops the
+// low-band energy is mostly waveform phase, and its beats land at every phase
+// of the kick reference.
 //
 // Each simulated earring is the firmware's pipeline behind the device model of
 // podcast_pattern_test.go (level, noise floors, spikes, tilt, clock drift, boot
 // offset). A beat is the frame the pipeline reports it on, placed at the end of
 // that frame in room time - the moment the LEDs can flash.
 //
-//	BEATWAV=/tmp/x/pod0.wav,/tmp/x/pod1200.wav go test -run TestBeatEval -v ./syncdsp/
-//	HEARSL=../../hears-left.wav HEARSR=../../hears-right.wav go test -run TestBeatHears -v ./syncdsp/
+//	python tools/beatref/kbeats.py /tmp/x/pod0.wav /tmp/x/pod0.beats   # once per file, needs librosa
+//	BEATREFDIR=/tmp/x BEATWAV=/tmp/x/pod0.wav,/tmp/x/pod1200.wav go test -run TestBeatEval -v ./syncdsp/
+//	BEATREFDIR=/tmp/x HEARSL=../../hears-left.wav HEARSR=../../hears-right.wav go test -run TestBeatHears -v ./syncdsp/
 //
 // Metrics, all after BeatEvalSkip seconds:
 //
@@ -32,7 +38,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -405,7 +413,7 @@ func TestBeatEval(t *testing.T) {
 	var phase [8]int
 	for _, path := range strings.Split(paths, ",") {
 		src := readPCM16(t, path)
-		refT, refP := refBeats(src)
+		refT, refP := loadRef(t, path, src)
 		t.Logf("%s: %d reference beats, median period %.1f ms (%.1f BPM)",
 			shortName(path), len(refT), median(refP)*1000, 60/median(refP))
 		for _, sc := range scenarios() {
@@ -453,7 +461,7 @@ func TestBeatHears(t *testing.T) {
 	}
 	lagS := float64(bestLag) * 64 / 16000
 	t.Logf("R lags L by %+.0f ms", lagS*1000)
-	refT, refP := refBeats(l)
+	refT, refP := loadRef(t, pl, l)
 	t.Logf("%d reference beats (from L), %.1f BPM", len(refT), 60/median(refP))
 	d := device{rms: 200}
 	a := runBeatDevice(l, d, refT, refP)
@@ -465,4 +473,30 @@ func TestBeatHears(t *testing.T) {
 		b.frameT[i] -= lagS
 	}
 	t.Logf("%v", scoreBeatPair(refT, refP, a, b))
+}
+
+// loadRef returns the reference beats for a recording: from BEATREFDIR/<name>.beats
+// (one time in seconds per line) when that exists, else refBeats. With a file
+// it also reports the phase of refBeats against it.
+func loadRef(t *testing.T, path string, src []int16) ([]float64, []float64) {
+	dir := os.Getenv("BEATREFDIR")
+	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	data, err := os.ReadFile(filepath.Join(dir, name+".beats"))
+	if dir == "" || err != nil {
+		return refBeats(src)
+	}
+	var times []float64
+	for _, f := range strings.Fields(string(data)) {
+		v, err := strconv.ParseFloat(f, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		times = append(times, v)
+	}
+	periods := make([]float64, len(times))
+	for i := range times {
+		a, b := max(i-4, 0), min(i+4, len(times)-1)
+		periods[i] = (times[b] - times[a]) / float64(b-a)
+	}
+	return times, periods
 }

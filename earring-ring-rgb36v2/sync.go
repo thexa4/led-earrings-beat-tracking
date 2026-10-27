@@ -256,7 +256,7 @@ func syncPoll() {
 	sh.beatMs = 0
 	if syncLocked {
 		flags |= syncShareLocked
-		sh.beatMs = uint16(per * 125 / 8) // 64 frames/s: 15.625 ms per frame
+		sh.beatMs = uint16(uint(per) * 125 >> 3) // 64 frames/s: 15.625 ms per frame
 	}
 	if syncSilent {
 		flags |= syncShareSilent
@@ -320,9 +320,9 @@ func syncAnimate(led, variant int) Color {
 		case syncBeatAge == 0:
 			// Beat: flash toward white for one analysis frame (~16 ms).
 			c = NewColor(
-				uint8(int(c.R())+(255-int(c.R()))/2),
-				uint8(int(c.G())+(255-int(c.G()))/2),
-				uint8(int(c.B())+(255-int(c.B()))/2))
+				uint8((uint(c.R())+255)>>1),
+				uint8((uint(c.G())+255)>>1),
+				uint8((uint(c.B())+255)>>1))
 		}
 	}
 
