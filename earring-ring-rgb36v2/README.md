@@ -120,6 +120,10 @@ func myCustomAnimation(led, frame int) Color {
 
 You can also take a look at all the other animations in the file to get some ideas of what you can do. However, make sure to keep it simple! The earring is running at a low frequency and if the animation is too complex it will run slowly and the LEDs will be much dimmer.
 
+## Using the music in your own patterns
+
+In party sync mode your custom patterns can react to the music: the beat, how loud the bass, mids and highs are, and the color scheme the earrings picked for the current section. See [SYNC-PROGRAMS.md](SYNC-PROGRAMS.md).
+
 ## Version history
 
   * 2026-06-01: initial version
