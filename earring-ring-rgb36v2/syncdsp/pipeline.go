@@ -198,10 +198,14 @@ type Pipeline struct {
 	// see the note where it is updated for why this one accumulator carries fraction bits
 	// when its neighbours do not.
 	//
-	cent      int32
+	// All four carry eight fraction bits. Only centGapQ8 used to, and the note
+	// written on it - that a plain integer EMA at shift 10 adds nothing at all
+	// while the difference to be caught is under 512, so the state stops wherever
+	// it happened to stop moving - applies to each of them equally.
+	centQ8    int32
 	centGapQ8 int32
-	centAvg   int32
-	centDev   int32
+	centAvgQ8 int32
+	centDevQ8 int32
 	centInit  bool
 
 	frame  int32
@@ -860,10 +864,10 @@ func (p *Pipeline) endFrame() Events {
 		// First frame: seed all of them so the centroid starts at rest rather than
 		// reading as a huge deviation from zero.
 		p.centInit = true
-		p.cent, p.centAvg, p.centDev, p.centGapQ8 = c, c, 0, 0
+		p.centQ8, p.centAvgQ8, p.centDevQ8, p.centGapQ8 = c<<8, c<<8, 0, 0
 	} else {
-		p.cent += (c - p.cent + (1 << (PatternCentroidShift - 1))) >> PatternCentroidShift
-		gap := p.cent - p.centAvg
+		p.centQ8 += ((c << 8) - p.centQ8 + (1 << (PatternCentroidShift - 1))) >> PatternCentroidShift
+		gap := (p.centQ8 >> 8) - (p.centAvgQ8 >> 8)
 		// The reference keeps following the raw deviation: low-passing it here instead
 		// would make the reference chase the same variation it exists to measure out, and
 		// the colour would stop meaning "unusual for this music". Only the quantity being
@@ -892,8 +896,18 @@ func (p *Pipeline) endFrame() Events {
 		if abs < 0 {
 			abs = -abs
 		}
-		p.centDev += (abs - p.centDev + (1 << (PatternScaleShift - 1))) >> PatternScaleShift
-		p.centAvg += (gap + (1 << (PatternScaleShift - 1))) >> PatternScaleShift
+		// The ruler is the familiar form - an average moving toward its input - so
+		// its Q8 version is the same expression with both sides lifted by 8 bits.
+		p.centDevQ8 += ((abs << 8) - p.centDevQ8 + (1 << (PatternScaleShift - 1))) >> PatternScaleShift
+		// The reference is not. It is written as an accumulation of the gap, so its
+		// Q8 form accumulates the gap in Q8. Lifting it into the toward-target form
+		// instead, ((gap<<8) - centAvgQ8) >> shift, makes the reference chase the gap
+		// rather than the centroid: it runs to zero, every gap then reads as the whole
+		// centroid, the ruler inflates by an order of magnitude and the ratio pins at
+		// one value - while the pattern column still looks perfectly plausible. Both
+		// tools reproduced that artifact before it was caught, which is why it is
+		// written down here rather than left to the arithmetic.
+		p.centAvgQ8 += ((gap << 8) + (1 << (PatternScaleShift - 1))) >> PatternScaleShift
 	}
 
 	// The pattern's backstop, deliberately placed here rather than next to the musical
@@ -1712,7 +1726,7 @@ func (p *Pipeline) pattern() int32 {
 	// and the ruler is left alone so that a device whose centroid is drifting is measured
 	// against the same yardstick as one whose centroid is not. See where centDev is
 	// updated.
-	return PatternIndexGap(p.centGapQ8>>8, p.centDev)
+	return PatternIndexGap(p.centGapQ8>>8, p.centDevQ8>>8)
 }
 
 // hashFrame computes the 24-bit perceptual hash of a smoothed band spectrum

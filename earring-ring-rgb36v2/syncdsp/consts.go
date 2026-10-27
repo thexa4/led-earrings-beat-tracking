@@ -488,7 +488,38 @@ const (
 //
 // Band 0 is the top band (>4 kHz) and band 7 the bottom one (<250 Hz), so the
 // weights are signed with bass positive: a large centroid is a bass-heavy moment.
-var PatternWeights = [NBands]int32{-7, -5, -3, -1, 1, 3, 5, 7}
+//
+// The ramp is replaced by a single contrast, band 4 against band 0. It still sums
+// to zero, which is the property the whole design rests on and the one thing that
+// must not be traded away: loudness then multiplies out of the centroid, so a
+// merely louder spectrum cannot move the colour.
+//
+// Read straight off the spectrum, the ramp was the wrong shape. Measured per band
+// on the 25 minute bench capture, each band expressed as its deviation from that
+// unit's own average so that level is removed and only shape is left, the two
+// microphones agree to +0.90 on band 0 (>4 kHz), +0.84 on band 5, +0.80 on band 4,
+// and to -0.42 on band 7 (<250 Hz) - inverted. The ramp put its largest negative
+// weight on the best-correlating band and its largest positive weight on the
+// inverted one. It was chosen for being monotone in frequency, which is a
+// reasonable guess about timbre and a poor guess about what two separate
+// microphones in one room actually agree on.
+//
+// Band 4 and band 0 are both positively shared, and differencing them still helps
+// because within one unit the two move oppositely - energy is not free, so a tilt
+// towards the air is a tilt away from the low mid. Subtracting an anti-correlated
+// pair therefore adds their shared parts instead of cancelling them, which is why
+// this beats weighting either band on its own.
+//
+// The paragraph above about fitted directions not transferring stands, and this
+// is not the same experiment. What failed was an eigenvector fitted to maximise
+// cross-device agreement, whose in-sample numbers looked far better than the other
+// capture's. This is a hand-written two-band contrast, and it was scored on the
+// half of the recording the choice was not made from: Spearman +0.96 on the half
+// it was ranked on and +0.92 on the unseen half, against +0.32 for the ramp, so
+// the ranking is not fitting noise. It is still one capture, one room and one
+// piece of music, and a weighting that reads six of eight bands as irrelevant
+// deserves suspicion on material that has nothing at 630 Hz.
+var PatternWeights = [NBands]int32{-7, 0, 0, 0, 7, 0, 0, 0}
 
 const (
 	// NumPatterns is the number of animation patterns the sync mode cycles
@@ -535,7 +566,7 @@ const (
 	// meaningless. See PatternGapShift, which is where that smoothing actually belongs:
 	// this constant changes what the deviation is measured against, and moving it is a
 	// weaker lever than low-passing the deviation itself.
-	PatternCentroidShift = 10
+	PatternCentroidShift = 11 // 33 s at 62.5 Hz, was 10: see PatternScaleShift
 
 	// PatternScaleShift is the time constant of the centroid's own reference level
 	// and spread. The spread sizes the steps that place the bucket boundaries, so it
@@ -572,7 +603,23 @@ const (
 	// 11 would mean shipping a longer version of a problem already known to be there. It
 	// is recorded as a measured preference only: the +8 points from PatternGapShift do not
 	// need it, and were re-measured with this constant at 10.
-	PatternScaleShift = 10
+	// PatternScaleShift and PatternGapShift together set how long the tilt has to
+	// persist before it is allowed to move the colour. Slowing both from 16 s to
+	// 33 s is the largest single gain measured on this path: on the 25 minute
+	// capture the pair agrees 45% of the time at 16 s (kappa +0.26 with the Q8
+	// reference) and 62% at 33 s (kappa +0.47). At 16 s one frame's spectral tilt
+	// is mostly noise, and no rule applied afterwards can recover information the
+	// number never held.
+	//
+	// Longer is not automatically better, and the test that says where to stop is a
+	// time-shifted control rather than the agreement itself: score the pair again
+	// with one device delayed, and any agreement that survives the delay was not
+	// about the present moment. At 33 s a 97 s delay collapses to kappa -0.02,
+	// which is chance, so what 33 s buys is genuine tracking. At 66 s the headline
+	// agreement is higher, 77%, but the same control only falls to +0.37 - much of
+	// that number is two units sitting on the same slow state, and it is not
+	// purchased at the price of a bigger buffer.
+	PatternScaleShift = 11
 
 	// PatternGapShift is the time constant of a low-pass applied to the centroid's
 	// deviation from its reference, after the deviation has been formed and before
@@ -644,7 +691,7 @@ const (
 	// and steady hash distance before this change and still does; what changed is
 	// that its pattern number stopped being vacuous. The same change moves
 	// TestAgreement/gain+tilt+drift, the realistic worst case, from failing to 100%.
-	PatternGapShift = 10
+	PatternGapShift = 11 // matched to PatternScaleShift, see its note
 
 	// PatternCentroidScale is extra headroom on the stored centroid. An EMA updated
 	// at 1/1024 per frame loses anything it is asked to track below ~1024 units, so
@@ -696,7 +743,23 @@ const (
 	// both even and stable: below 1/512 the estimates stop converging within a track
 	// and 92% of the time lands in one bucket. See TestCentroidFeature, which
 	// compares the two rulers over the same recorded spectra.
-	PatternCutQ8 = 216
+	// Narrowed from 216. That value was right for a reference that had frozen: with
+	// the deviation stuck at its deadband the ratio ran wide and only a very wide
+	// pair of cuts kept any colour at all. With the reference and the ruler both in
+	// Q8 the ratio's quartiles sit nearer the middle and 150 measured the best
+	// minimum occupancy at the 33 s time constant (four colours between 14% and
+	// 37%, against 0.9% minimum for the shipped combination).
+	//
+	// It is still not even, and the honest reason is recorded here so the next
+	// person does not spend an afternoon on it: three cuts placed symmetrically
+	// about the average can only land on the quartiles of a distribution whose
+	// middle is its average, and this one's median sits about 50 counts under its
+	// average with a longer left tail. Sweeping the cut at every smoothing scale,
+	// with both a symmetric ruler and a per-direction one, never produced a minimum
+	// occupancy above about 17%. Even colours need thresholds placed at empirical
+	// quantiles of the device's own recent distribution, which is a different
+	// mechanism and has not been built.
+	PatternCutQ8 = 150
 
 	// PatternMaxHoldFrames is the longest the pattern is ever allowed to go without
 	// being re-read, in analysis frames: 4 s at 62.5 Hz.

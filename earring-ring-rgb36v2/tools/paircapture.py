@@ -137,8 +137,13 @@ class PipeState:
     # centroid, and then the one quantity whose tuning was chosen offline is the one
     # quantity never observed on a device running the code that uses it - every
     # comparison is against a device running something older.
-    NAMES = {"cent", "centGapQ8", "centAvg", "centDev", "smooth", "agcShift",
-             "frame", "lastPattern"}
+    # cent, centAvg and centDev are kept in Q8 inside the Pipeline now, like
+    # centGapQ8 always was: an integer EMA at shift 10 deadbands at +/-512 and one
+    # device's reference was measured sitting there for a whole capture. They are
+    # shifted back down here so the columns in state_*.csv keep the units every
+    # scoring tool already assumes, rather than changing meaning underneath them.
+    NAMES = {"centQ8", "centGapQ8", "centAvgQ8", "centDevQ8", "smooth",
+             "agcShift", "frame", "lastPattern"}
     FIELDS = ["t", "cent", "gapQ8", "centAvg", "centDev", "pat", "frame",
               "agc"] + [f"b{i}" for i in range(8)]
 
@@ -212,8 +217,9 @@ class PipeState:
         def g(name):
             return struct.unpack("<i", struct.pack("<I", w[self.off[name] // 4]))[0]
 
-        row = dict(t=round(t, 3), cent=g("cent"), gapQ8=g("centGapQ8"),
-                   centAvg=g("centAvg"), centDev=g("centDev"),
+        row = dict(t=round(t, 3), cent=g("centQ8") >> 8,
+                   gapQ8=g("centGapQ8"),
+                   centAvg=g("centAvgQ8") >> 8, centDev=g("centDevQ8") >> 8,
                    pat=g("lastPattern"), frame=g("frame"), agc=g("agcShift"))
         base = self.off["smooth"] // 4
         for i in range(8):

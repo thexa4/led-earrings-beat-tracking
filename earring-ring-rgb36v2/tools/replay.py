@@ -63,7 +63,7 @@ def load(dirname, side):
 
 
 def track(cent, frames, ref_shift=10, dev_shift=10, seed=None, smooth=0,
-          dev_raw=False):
+          dev_raw=False, dev_frac=False):
     """Reproduce the firmware's reference and spread from the centroid alone.
 
     `smooth` is an extra low-pass on the deviation itself, in frame shifts, and is 0
@@ -86,6 +86,20 @@ def track(cent, frames, ref_shift=10, dev_shift=10, seed=None, smooth=0,
     float version instead measured a quarter-spread disagreement with the device's own
     reference, sign following whether the centroid was rising or falling.
 
+    `dev_frac` carries the spread's EMA in Q8 instead of whole units, which is the
+    same deadband problem solved the way the gap's low-pass already solves it: the
+    spread's own update is `d += (|g| - d + 512) >> 10`, so it cannot move while |g|
+    is within 512 of it, and 512 is half of a typical spread. Measured on the hour,
+    61% of frames on one earring and 65% on the other sit inside that band, and on a
+    quiet passage the spread freezes outright - the left earring over one capture
+    read exactly 512, its seed, for every single sample while its partner's spread
+    moved between 1200 and 3400. The divisor is supposed to be that device's own
+    yardstick; frozen, it is a constant, and a constant that happens to be smaller
+    than the deviation pushes that device toward an end colour. In Q8 the deadband is
+    two units of the centroid rather than five hundred and twelve. Reported here
+    before it is shipped, because three plausible fixes to this codepath have already
+    been falsified by measurement.
+
     What remains approximate is the input: the centroid is sampled at ~5 Hz and held
     across the frames in between, against a 16 s EMA.
 
@@ -103,6 +117,8 @@ def track(cent, frames, ref_shift=10, dev_shift=10, seed=None, smooth=0,
     dev = [0] * len(cent)
     avg = cent[0] if seed is None else seed[0]
     d = 0 if seed is None else seed[1]
+    if dev_frac:
+        d <<= 8
     gs = 0
     rhalf = 1 << (ref_shift - 1)
     dhalf = 1 << (dev_shift - 1)
@@ -128,12 +144,14 @@ def track(cent, frames, ref_shift=10, dev_shift=10, seed=None, smooth=0,
                 # numerator and loses most of its variation from the ruler, so z runs to
                 # the clamp and both earrings pin to an end colour.
                 src = g if dev_raw else gs
-                d += (abs(src) - d + dhalf) >> dev_shift
+                a = abs(src)
             else:
-                d += (abs(g) - d + dhalf) >> dev_shift
+                a = abs(g)
+            d += (((a << 8) - d + dhalf) if dev_frac
+                  else (a - d + dhalf)) >> dev_shift
             avg += (g + rhalf) >> ref_shift
         gap[i] = gs if smooth else g
-        dev[i] = d
+        dev[i] = d >> 8 if dev_frac else d
     return gap, dev
 
 

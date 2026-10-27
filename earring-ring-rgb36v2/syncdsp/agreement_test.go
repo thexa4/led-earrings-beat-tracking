@@ -388,28 +388,77 @@ func TestGolden(t *testing.T) {
 // TestPatternWeightsRamp checks the weights that collapse the spectrum into one
 // number, which is where the design of the pattern choice actually lives.
 //
-// The ramp has to run monotonically from treble to bass: that ordering is what
-// makes two earrings that disagree land on neighbouring colours instead of on
-// opposite ones, and a single transposed weight would break it silently. It has
-// to sum to zero, because that is what makes a flat spectrum - and, with it, any
-// gain the AGC has put on the frame, since a gain adds the same amount to every
-// band - produce no deviation at all rather than a bias towards one end.
+// It no longer requires the weights to rise monotonically from treble to bass.
+// That was a proxy for two things, and the contrast this replaced the ramp with
+// keeps the one that matters while dropping the other:
+//
+//   - Ordering the colours so two earrings that disagree land on neighbours rather
+//     than on opposites. That is a property of the index, which maps one ordered
+//     scalar onto ordered patterns, not of the weights being monotone in
+//     frequency. TestPatternIndexBucket covers it directly.
+//   - Summing to zero, so a flat spectrum and a uniform AGC gain produce no
+//     deviation at all. This one is load-bearing and is checked below, and now also
+//     behaviourally rather than only by adding up constants.
+//
+// Monotone in frequency turned out to cost agreement: it puts the largest positive
+// weight on the band the two microphones disagree about most strongly, and disagree
+// in the opposite direction to every other band. See PatternWeights.
 func TestPatternWeightsRamp(t *testing.T) {
 	if len(PatternWeights) != NBands {
 		t.Fatalf("PatternWeights covers %d bands, the spectrum has %d", len(PatternWeights), NBands)
 	}
-	sum := int32(0)
-	for i, w := range PatternWeights {
+	sum, pos, neg := int32(0), 0, 0
+	max := int32(0)
+	for _, w := range PatternWeights {
 		sum += w
-		// PatternWeights is ordered treble first, so it must rise towards the bass.
-		if i > 0 && w <= PatternWeights[i-1] {
-			t.Errorf("weight %d (%d) does not exceed weight %d (%d): the ramp must run up towards the bass",
-				i, w, i-1, PatternWeights[i-1])
+		if w > 0 {
+			pos++
+		}
+		if w < 0 {
+			neg++
+		}
+		if a := abs32(w); a > max {
+			max = a
 		}
 	}
 	if sum != 0 {
 		t.Errorf("PatternWeights sums to %d, want 0: a flat spectrum must give no deviation", sum)
 	}
+	// A zero sum with a single non-zero band is arithmetically fine and useless in
+	// practice: it would read one filter and nothing else. Two bands on each side is
+	// the minimum that still averages down the noise in any one of them, which is
+	// the stated reason for weighting the spectrum instead of picking a band.
+	if pos < 1 || neg < 1 {
+		t.Errorf("weights have %d positive and %d negative entries: with only one sign "+
+			"the centroid tracks loudness, not shape", pos, neg)
+	}
+	// PatternMinDev is an absolute threshold on the spread of this weighted sum, so
+	// the weights carry its meaning: scale the weights down and the guard starts
+	// rejecting real music, scale them up and it stops catching a silent device.
+	if max < 5 || max > 9 {
+		t.Errorf("largest weight is %d: PatternMinDev=%d is stated in units of a sum "+
+			"weighted to roughly this size, so rescaling here silently moves that guard",
+			max, PatternMinDev)
+	}
+	// The sum-zero property, checked as behaviour: a spectrum with the same value in
+	// every band must produce no deviation whatever that value is, since that is
+	// exactly what a flat response and an AGC gain both look like to this code.
+	for _, lvl := range []int32{1 << 10, 1 << 13, 1 << 15} {
+		c := int32(0)
+		for _, w := range PatternWeights {
+			c += lvl * w
+		}
+		if c != 0 {
+			t.Errorf("a flat spectrum at level %d gives centroid %d, want 0", lvl, c)
+		}
+	}
+}
+
+func abs32(v int32) int32 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // TestPatternIndexBucket checks the map from the centroid to a pattern: always in
@@ -589,11 +638,17 @@ func TestPatternSilenceHoldsMiddle(t *testing.T) {
 		noisy(3, 7)(win, nil)
 		p.Process(win)
 	}
-	if p.centDev < PatternMinDev {
-		t.Logf("spread %d is below the guard %d as expected", p.centDev, PatternMinDev)
+	// Read in plain centroid units, which is what PatternMinDev is stated in and
+	// what the message is meant to be read as. Note this assertion is now a harder
+	// test than it was: with the spread held in Q8 it can settle on its true value
+	// instead of freezing wherever a 512-count deadband stopped it, so a failure
+	// here means the guard genuinely no longer catches a still device rather than
+	// that the spread was artificially clamped low.
+	if dev := p.centDevQ8 >> 8; dev < PatternMinDev {
+		t.Logf("spread %d is below the guard %d as expected", dev, PatternMinDev)
 	} else {
 		t.Errorf("on silence the spread grew to %d, above the guard %d: the guard no longer catches a still device",
-			p.centDev, PatternMinDev)
+			dev, PatternMinDev)
 	}
 	if got := p.pattern(); got != NumPatterns/2 {
 		t.Errorf("after 48 s of silence the pattern is %d, want the middle %d", got, NumPatterns/2)

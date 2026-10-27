@@ -131,7 +131,11 @@ func runCentroid(t *testing.T, data []uint16, dist func([]uint16, *int32), from,
 		ev := p.Process(win)
 		d.committed[f-from] = ev.Pattern
 		d.instant[f-from] = p.pattern()
-		d.cent[f-from], d.avg[f-from], d.dev[f-from] = p.cent, p.centAvg, p.centDev
+		// Shifted back out of Q8: every statistic this harness computes downstream is
+		// written in plain centroid units, the same reason paircapture does it.
+		d.cent[f-from] = p.centQ8 >> 8
+		d.avg[f-from] = p.centAvgQ8 >> 8
+		d.dev[f-from] = p.centDevQ8 >> 8
 	}
 	return d
 }
