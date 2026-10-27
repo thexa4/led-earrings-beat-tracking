@@ -75,10 +75,16 @@ func animate(mode, variant, led, frame int) Color {
 		return trace(led, frame, variant)
 	case modeNoise:
 		return noise(led, frame, variant)
-	case modeFire:
-		return fire(led, frame, variant)
-	case modeFireSound:
-		return fireSound(led, frame, variant)
+	case modeFire, modeFireSound:
+		// One flame call site, inlined: a call per LED is a visible part of
+		// the main-loop pass, and so of the brightness.
+		var heat uint8
+		if mode == modeFire {
+			heat = fireHeat(led, frame)
+		} else {
+			heat = fireSoundHeat(led)
+		}
+		return flame(heat, variant)
 	case modeStatic:
 		return staticColor(led, frame, variant)
 	case modeFlag:
@@ -290,8 +296,8 @@ func fireColor(variant int) color.RGBA {
 	}
 }
 
-// Fire animation in various colors.
-func fire(led, frame, variant int) Color {
+// fireHeat is the heat of the fire animation at led (see flame).
+func fireHeat(led, frame int) uint8 {
 	intensityIndex := indexFromBottom(led)
 	noiseIndex := uint32(frame) - uint32(intensityIndex)
 	if led > numLEDs/2 {
@@ -311,16 +317,14 @@ func fire(led, frame, variant int) Color {
 		heat -= uint8(cooling)
 	}
 
-	// Turn it into a flame, based on the given palette.
-	// Perhaps we could use an actual 0-255 (or 0-64) palette instead? That
-	// might be faster.
-	return flame(heat, variant)
+	return heat
 }
 
 var volumeHistory [36]uint8
 var volumeHistoryIndex uint8
 
-func fireSound(led, frame, variant int) Color {
+// fireSoundHeat is the heat of the sound-reactive fire at led (see flame).
+func fireSoundHeat(led int) uint8 {
 	// LED indices calculated, so they start from the bottom and alternate
 	// between the two sides:
 	// LED 14: index 6
@@ -357,12 +361,10 @@ func fireSound(led, frame, variant int) Color {
 		heat -= uint8(cooling)
 	}
 
-	return flame(heat, variant)
+	return heat
 }
 
 // flame is the color of both fire animations at the given heat.
-//
-//go:noinline
 func flame(heat uint8, variant int) Color {
 	c := coloredFlame(heat, fireColor(variant))
 	return NewColor(c.R, c.G, c.B)

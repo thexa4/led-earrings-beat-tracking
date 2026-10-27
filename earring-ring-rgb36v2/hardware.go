@@ -123,9 +123,7 @@ func sleepUntilButtonPress() {
 	disableLEDs()
 
 	// Clear LEDs to avoid flash on poweron.
-	for i := 0; i < 12; i++ {
-		setLEDs(i, 0, 0, 0)
-	}
+	clearLEDs()
 
 	// Enter stop mode, wake up on a button press.
 	buttonWake.Set(0)
@@ -250,12 +248,15 @@ func disableMic() {
 	stm32.RCC.SetICSCR_MSIRANGE(defaultMSIRANGE)
 }
 
+// updateMic stores the last conversion and starts the next one (micSample,
+// inlined: it runs every main-loop pass in the mic modes).
 func updateMic(index int) {
-	micSamples[index] = micSample()
+	micSamples[index] = uint16(stm32.ADC.DR.Get())
+	stm32.ADC.CR.Set(stm32.ADC_CR_ADEN | stm32.ADC_CR_ADSTART)
 }
 
-// micSample reads the last conversion and starts the next one. A call, also
-// in enableMic's calibration loop, which -opt=2 would otherwise unroll four
+// micSample reads the last conversion and starts the next one. A call in
+// enableMic's calibration loop, which -opt=2 would otherwise unroll four
 // times.
 //
 //go:noinline

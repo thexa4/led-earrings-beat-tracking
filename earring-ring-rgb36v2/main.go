@@ -1,7 +1,5 @@
 package main
 
-import "runtime/volatile"
-
 // State: current mode, current variant, previous variants, 4 hash bytes
 //
 //go:align 4 // flashWrite reinterprets this as words
@@ -59,11 +57,8 @@ func main() {
 		}
 
 		// Update 3 LEDs at a time, since that's convenient for the
-		// RGB-to-bitplane conversion.
-		setLEDs(index, uint32(led0), uint32(led1), uint32(led2))
-
-		// Bitbang the LEDs.
-		updateLEDs()
+		// RGB-to-bitplane conversion, and bitbang all of them.
+		refreshLEDs(index, uint32(led0), uint32(led1), uint32(led2))
 		benchPass() // -tags passcount only
 
 		index++
@@ -182,19 +177,6 @@ func main() {
 	}
 }
 
-// clearLEDs turns every LED off in the bitplanes; the next updateLEDs shows it.
-//
-//go:noinline
-func clearLEDs() {
-	// The bound goes through a volatile read: -opt=2 unrolls any loop with a
-	// constant trip count into twelve calls (150 B).
-	for i := range int(volatile.LoadUint8(&ledGroups)) {
-		setLEDs(i, 0, 0, 0)
-	}
-}
-
-var ledGroups uint8 = numLEDs / 3 // see clearLEDs
-
 // startModeAudio starts whatever audio input mode needs: the sync pipeline or
 // the microphone (or nothing).
 //
@@ -231,10 +213,7 @@ func turnOffAnimation(mode, variant, frame int) {
 			if index+24 < i*3 {
 				led2 = 0
 			}
-			setLEDs(index, uint32(led0), uint32(led1), uint32(led2))
-
-			// Bitbang the LEDs.
-			updateLEDs()
+			refreshLEDs(index, uint32(led0), uint32(led1), uint32(led2))
 		}
 	}
 }

@@ -121,7 +121,7 @@ func lavaLamp(led, ms int) Color {
 		blob = blob * 13 >> 4
 	}
 	a := uint8(max(blob-60, 0) * 21 >> 4)
-	c := mix(NewColor(180, 100, 20), NewColor(0, 180, 255), a)
+	c := paletteAt(lavaColors, uint16(a)<<4) // amber to blue
 	if a > 220 {
 		c = addWhite(c, int(a-220)*4)
 	}
@@ -158,9 +158,20 @@ func sin8(x uint8) uint8 {
 	return uint8(128 + p)
 }
 
+// lavaColors is the lava lamp's two colors as a palette: positions below
+// 0x100 blend amber (180, 100, 20) into blue (0, 180, 255).
+const lavaColors = "\xB4\x64\x14\x00\xB4\xFF"
+
 // rainbow is the noise animations' rainbow palette at hue (0..255).
 func rainbow(hue uint8) Color {
-	return palette16At(noisePalettes[48:96], uint16(hue)<<8)
+	return paletteAt(noisePalettes[48:96], uint16(hue)<<8)
+}
+
+// paletteAt is palette16At as a call, shared by the ported patterns.
+//
+//go:noinline
+func paletteAt(p string, position uint16) Color {
+	return palette16At(p, position)
 }
 
 // addWhite adds w (0..255) to every channel, saturating.

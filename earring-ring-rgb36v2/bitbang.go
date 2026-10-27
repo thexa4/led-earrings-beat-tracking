@@ -45,42 +45,61 @@ func disableLEDs() {
 	stm32.GPIOA.OTYPER.Set(0)
 }
 
-// This function really shouldn't be inlined, since it is called in a few places
-// and if it's inlined all of the long assembly for generating bitplanes is also
-// inlined there.
-//
-//go:noinline
-func setLEDs(index int, led0, led1, led2 uint32) {
-	// Each group of three indices has its common line on one of the four pin
-	// slots (see bitbang_update_bitplane), which gets 0; the other three LEDs
-	// go to the remaining slots in board order. tools/bitbang_equiv.py checks
-	// this against the per-group builders it replaced.
-	a, b, c, d := led0, led2, led1, uint32(0)
-	switch index / 3 {
-	case 0:
-		b, c, d = 0, led2, led1
-	case 1:
-		c, d = 0, led1
-	case 3:
-		a, d = 0, led0
-	}
-	// bitbang_show_leds takes the groups in the order of their common pins'
-	// bits: index 0..8 have PA8..PA0, 9..11 PA15, PA10, PA9.
-	pos := 8 - index
-	if index > 8 {
-		pos = 20 - index
-	}
-	C.bitbang_update_bitplane(a, b, c, d, &bitplanes[pos][0])
+// refreshLEDs puts led0..led2 (the LEDs index, index+12 and index+24) in the
+// bitplanes, then shows all twelve groups once. The LEDs are lit only while
+// it shows them, so every cycle a main-loop pass spends elsewhere makes them
+// dimmer: one call through a register (bitbang_refresh_leds) to one function
+// in RAM, which converts and shows.
+func refreshLEDs(index int, led0, led1, led2 uint32) {
+	C.bitbang_refresh_leds(C.int(index), led0, led1, led2)
 }
 
-var bitplanes [12][3]uint32 // in bitbang_show_leds order, see setLEDs
-
-// Putting updateLEDs in RAM saves a bit of current consumption.
-// TODO: this goes through a thunk, which adds a few cycles. GCC has
-// __attribute__((long_call)) for ARM, perhaps we can also add this to Clang?
-// (It's supported in Clang, but not in the ARM backend).
-//
-//go:section .ramfuncs.updateLEDs
+// updateLEDs shows the bitplanes as they are.
 func updateLEDs() {
+	refreshLEDs(-1, 0, 0, 0)
+}
+
+// refreshLEDsRAM is refreshLEDs; index < 0 only shows. In RAM: that saves a
+// bit of current, and at 16 MHz (sync mode) flash has a wait state.
+//
+//export refreshLEDsRAM
+//go:section .ramfuncs.refreshLEDs
+func refreshLEDsRAM(index int, led0, led1, led2 uint32) {
+	if index >= 0 {
+		// Each group of three indices has its common line on one of the
+		// four pin slots (see bitbang_update_bitplane), which gets 0; the
+		// other three LEDs go to the remaining slots in board order.
+		// tools/bitbang_equiv.py checks this against the per-group builders
+		// it replaced.
+		a, b, c, d := led0, led2, led1, uint32(0)
+		switch index / 3 {
+		case 0:
+			b, c, d = 0, led2, led1
+		case 1:
+			c, d = 0, led1
+		case 3:
+			a, d = 0, led0
+		}
+		// bitbang_show_leds takes the groups in the order of their common
+		// pins' bits: index 0..8 have PA8..PA0, 9..11 PA15, PA10, PA9.
+		pos := 8 - index
+		if pos < 0 {
+			pos += 12
+		}
+		// index is a group (0..11), so pos is in range: no bounds check.
+		group := unsafe.Add(unsafe.Pointer(&bitplanes), pos*int(unsafe.Sizeof(bitplanes[0])))
+		C.bitbang_update_bitplane(a, b, c, d, (*uint32)(group))
+	}
 	C.bitbang_show_leds(&bitplanes[0][0], unsafe.Pointer(stm32.GPIOA))
+}
+
+var bitplanes [12][4]uint32 // in bitbang_show_leds order, see refreshLEDsRAM
+
+// ledsOff is the bitplane word that lights nothing: every LED pin high (what
+// bitbang_update_bitplane makes of black).
+const ledsOff = ledPins<<16 | ledPins
+
+// clearLEDs turns every LED off in the bitplanes; the next refresh shows it.
+func clearLEDs() {
+	C.bitbang_fill(&bitplanes[0][0], ledsOff, C.int(len(bitplanes)*len(bitplanes[0])))
 }

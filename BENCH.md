@@ -546,13 +546,29 @@ Measured 2026-10-27 on scream-rx (re-measure):
   image - as `tools/synccpu.py` does; `flash erase_address` refuses the 128-byte page
   outright.
 - **CPU load in sync mode** (`tools/synccpu.py`, `-tags syncboot`, which counts loop
-  passes): the analysis takes ~9.4 M cycles/s (59%), a loop pass ~1360 cycles plus
+  passes): the analysis takes ~9.4 M cycles/s (59%), a loop pass ~1230 cycles plus
   three `getPixel` calls, and the pipeline falls behind below 667 passes/s - so about
-  2850 cycles per `getPixel`. (A pass was ~1230 cycles before `updateLEDs` and
-  `setLEDs` became loops to save flash: 4844 instead of 5374 passes/s with an empty
-  program.) Loss shows as frames/s under the earring's sample rate
+  2850 cycles per `getPixel`. Loss shows as frames/s under the earring's sample rate
   / 250 (43/s with 16 divisions per pixel); the backlog is only a hint, as it is
   sampled from the host.
+- **The bench earrings were replaced on 2026-10-27** (afternoon) by different units:
+  numbers above this line are from the old pair. Compare builds back to back on the
+  same earring, and never write the old pair's saved tails onto the new ones.
+- **LED brightness is main-loop passes/s.** The LEDs are lit only while a pass
+  refreshes them, for the same 12 x 31 cycles every pass, so a longer pass is a
+  dimmer earring (and outside sync mode a slower animation: a frame is 12 passes).
+  `tools/passrate.py` (`-tags passcount`) measures every mode on one earring, writing
+  the whole flash per mode with the earring's own slots - which it takes from the
+  earring, so run it after `synccpu.py` and custom 0 measures synccpu's program
+  (314 instead of 323 passes/s with an empty slot). New L, 5af7891 / the flash
+  savings and patterns (4470b65) / the fix: trace 246.4 / 232.9 / 245.5, fire 223.7 /
+  205.5 / 224.1, sync pulse 2464 / 2185 / 2400 passes/s; modes 0-9 within 0.4% of
+  5af7891 (the run-to-run noise). Sync with synccpu, new L/R,
+  5af7891 then the fix: pulse 2467/2456 then 2413/2408, empty program 5365/5371 then
+  5321/5332. The ~2% left in sync is not in the code that changed (the same
+  instructions per pass); the most likely cause is `syncPoll` and `main` moving by
+  4 bytes mod 8 in flash (1 wait state at 16 MHz) - an inference, not measured.
+  Accepted: sync has ~3.6x the 667 passes/s it needs.
 - **What both microphones heard, frame by frame** (`tools/syncbands.py record`,
   `-tags syncboot`, `--elf` the image on the earrings): ~100 reads/s of the
   pipeline's band energies and comb state per earring, enough for every 64/s frame

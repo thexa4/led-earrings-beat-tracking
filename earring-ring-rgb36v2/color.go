@@ -26,17 +26,6 @@ func (c Color) Scale(intensity int) Color {
 		uint8((int(c.B())*intensity)/256))
 }
 
-// mix blends top into bottom by alpha (0..255), per channel: the noise
-// palettes' interpolation, shared with the ported patterns.
-//
-//go:noinline
-func mix(bottom, top Color, alpha uint8) Color {
-	return NewColor(
-		blend8(bottom.R(), top.R(), alpha),
-		blend8(bottom.G(), top.G(), alpha),
-		blend8(bottom.B(), top.B(), alpha))
-}
-
 // blend8 mixes top into bottom by topAlpha. Identical arithmetic to
 // ledsgo.blend for 32-bit targets.
 func blend8(bottom, top, topAlpha uint8) uint8 {

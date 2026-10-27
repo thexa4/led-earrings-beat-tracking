@@ -12,18 +12,17 @@ package main
 
 // palette16At returns the palette color at a 16-bit position, interpolating
 // between neighbours and wrapping at the top. Bit-identical to
-// ledsgo.Palette16.ColorAt. Shared by noise and the ported patterns'
-// rainbow, hence not inlined.
-//
-//go:noinline
+// ledsgo.Palette16.ColorAt. Inlined into noise, where a call per LED would
+// cost brightness; the ported patterns share it through paletteAt.
 func palette16At(p string, position uint16) Color {
 	index := int(position >> 12)
 	next := (index + 1) & 15
-	return mix(paletteEntry(p, index), paletteEntry(p, next), uint8(position>>4))
-}
-
-func paletteEntry(p string, i int) Color {
-	return NewColor(p[i*3], p[i*3+1], p[i*3+2])
+	i, j := index*3, next*3
+	alpha := uint8(position >> 4)
+	return NewColor(
+		blend8(p[i], p[j], alpha),
+		blend8(p[i+1], p[j+1], alpha),
+		blend8(p[i+2], p[j+2], alpha))
 }
 
 const (

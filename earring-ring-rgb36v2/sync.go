@@ -300,8 +300,6 @@ var _ [numNoisePatterns - syncdsp.NumPatterns]struct{} // every pattern has a pa
 // Until flash ran out there was also a hash readout, an instrument for
 // checking earrings against each other (section hash as a color, a dot
 // chasing the beat); it is an uploadable program now, in SYNC-PROGRAMS.md.
-//
-//go:noinline
 func syncAnimate(led, variant int) Color {
 	if variant&^1 == 2 {
 		return showCustom(led, syncMillis(), variant-2)
@@ -309,11 +307,10 @@ func syncAnimate(led, variant int) Color {
 
 	// The pipeline picks one of NumPatterns patterns from the spectrum (a
 	// pure function, identical on every device); the noise palettes give
-	// them visibly different looks.
+	// them visibly different looks. Pulse is tested first and the patterns
+	// last: these tests run for every LED, in the pass that lights them.
 	var c Color
-	if variant >= 4 {
-		c = syncPattern(led, variant)
-	} else if variant == 0 {
+	if variant == 0 {
 		c = noise(led, syncNoiseT, syncVariant).Scale(syncBright)
 
 		// Glitter: up to 1 in 8 LEDs, more the louder the highs, each held
@@ -323,7 +320,7 @@ func syncAnimate(led, variant int) Color {
 		if h := syncShare.high; uint8(x>>24) < h>>3 {
 			c = NewColor(h, h, h)
 		}
-	} else {
+	} else if variant == 1 {
 		c = noise(led, syncAnimFrame, syncVariant)
 		switch {
 		case !syncLocked:
@@ -337,6 +334,8 @@ func syncAnimate(led, variant int) Color {
 				uint8((uint(c.G())+255)>>1),
 				uint8((uint(c.B())+255)>>1))
 		}
+	} else {
+		c = syncPattern(led, variant)
 	}
 
 	if syncAnchorAge <= 1 {
