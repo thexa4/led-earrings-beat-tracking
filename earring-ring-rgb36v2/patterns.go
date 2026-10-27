@@ -184,13 +184,13 @@ func addWhite(c Color, w int) Color {
 		uint8(min(int(c.B())+w, 255)))
 }
 
-// syncPattern draws sync mode's ported variants: 5 interference pulse, 6
+// syncPattern draws sync mode's ported variants: 6 interference pulse, 7
 // synthwave. The C versions faked a beat every 600 ms; these take it from the
 // sync data (beatPhase: 0 on the beat, 255 just before the next one).
 func syncPattern(led, variant int) Color {
 	t := syncAnimFrame // 1/64 s
 	phase := int(syncShare.beatPhase)
-	if variant == 5 {
+	if variant == 6 {
 		// Interference pulse: two sine waves around the ring at slightly
 		// different speeds (millis/10 and millis/11), through the rainbow,
 		// plus white that fades from the beat to the next.

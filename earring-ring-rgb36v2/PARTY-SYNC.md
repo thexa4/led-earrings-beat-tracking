@@ -676,6 +676,11 @@ multiply, and `adcDataNormalized` overlaid on the unused tail of
 stores through the `unsafe.Pointer` cast alias the DMA buffer and cost +592 B
 of lost register allocation.*
 
+*The third slot is back since 2026-10-27 (`FLASH_TEXT = 32K - 128 - 1536*3`,
+`modeCustom2` as mode 10, slot 2 as sync variant 5): 1,700 B of loops that
+`-opt=2` unrolled, in the receiver and the main firmware, are kept rolled now
+(the `rolled` package), and the build is 27,824 B of 28,032.*
+
 ```go
 const (
     SampleRate = 15997   // nominal Hz (bank coefficients); the device now

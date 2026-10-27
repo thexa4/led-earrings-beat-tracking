@@ -45,8 +45,9 @@ from hash32 import hash32
 
 PORTS = {"L": 4445, "R": 4446}
 SLOT0 = 0x08007980
+CODE_END = 0x08006D80  # the firmware ends below the three pattern slots
 STATE = 0x08007F80
-MODE_SYNC, MODE_CUSTOM0 = 10, 8
+MODE_SYNC, MODE_CUSTOM0 = 11, 8
 PCSR, NDTR = 0xE000101C, 0x4002000C
 SHARE = 0x20001FC0
 
@@ -89,7 +90,7 @@ def program(fw_bin, tail, work):
     # share the last one with the firmware's tail: writing them alone erases
     # the end of the firmware. So every run writes the whole 32 kB image.
     fw = open(fw_bin, "rb").read()
-    assert len(fw) <= SLOT0 - 0x08000000
+    assert len(fw) <= CODE_END - 0x08000000
     full = fw + bytes(SLOT0 - 0x08000000 - len(fw)) + tail
     assert len(full) == 32768
     open(f"{work}/full.hex", "w").write(ihex(full, 0x08000000))

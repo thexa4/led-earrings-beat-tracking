@@ -3,7 +3,7 @@
 
   tinygo build -tags passcount -o pc.elf -target=./stm32l0x1.json -opt=2 -panic=trap .
   tinygo build -tags passcount -o pc.bin -target=./stm32l0x1.json -opt=2 -panic=trap .
-  tools/passrate.py pc.elf [--modes 0-11] [--variant 0] [--side L] [--seconds 10]
+  tools/passrate.py pc.elf [--modes 0-12] [--variant 0] [--side L] [--seconds 10]
                     [--settle 3] [--restore fw.bin]
 
 pc.bin must sit next to pc.elf. The LEDs are lit only while a pass refreshes
@@ -12,8 +12,8 @@ outside sync mode, how fast the animation runs: a frame is 12 passes). Compare
 two builds mode by mode, on the same earring.
 
 For each mode the whole flash is written - the firmware, then the earring's
-own tail (both pattern slots, read once at the start) with a state page that
-boots into that mode, at --variant - and after --settle seconds
+own tail (the three pattern slots, read once at the start) with a state page
+that boots into that mode, at --variant - and after --settle seconds
 main.benchPasses is read over --seconds. In sync mode variant 0 is waves and 1
 pulse. A mode the firmware doesn't have boots into trace.
 --restore writes that firmware and the original tail back at the end;
@@ -32,10 +32,10 @@ import telem
 from hash32 import hash32
 from synccpu import PORTS, funcs, ihex
 
-TAIL = 0x08007380  # pattern slot 1, slot 0, then the state page
+TAIL = 0x08006D80  # pattern slots 2, 1, 0, then the state page
 STATE = 0x08007F80
 NAMES = ["trace", "noise", "fire", "fire sound", "static", "flag", "sparkle",
-         "VU meter", "custom 0", "custom 1", "sync", "basic"]
+         "VU meter", "custom 0", "custom 1", "custom 2", "sync", "basic"]
 
 
 def program(port, fw, tail, work):
@@ -72,7 +72,7 @@ def modes(spec):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("elf")
-    ap.add_argument("--modes", type=modes, default=modes("0-11"))
+    ap.add_argument("--modes", type=modes, default=modes("0-12"))
     ap.add_argument("--variant", type=int, default=0)
     ap.add_argument("--side", choices=PORTS, default="L")
     ap.add_argument("--seconds", type=float, default=10)

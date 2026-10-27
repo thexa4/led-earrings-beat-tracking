@@ -538,9 +538,10 @@ Measured 2026-10-27 on scream-rx (re-measure):
   microphone hears the room. Only the right channel decodes at all - the left
   speaker reaches neither earring well enough.
 - **Writing a pattern slot over SWD erases the end of the firmware.** OpenOCD erases
-  this flash in 4 kB sectors (`flash info 0`), and the two pattern slots and the state
-  page share the last sector (0x08007000) with the firmware's tail, so `flash
-  write_image erase` of a slot wipes 0x08007000 up to the slot too. The firmware then
+  this flash in 4 kB sectors (`flash info 0`), and the pattern slots and the state page
+  share their sectors with the firmware's tail (slot 2 starts at 0x08006D80, in the
+  sector from 0x08006000), so `flash write_image erase` of a slot wipes its sector from
+  the start up to the slot too. The firmware then
   runs until it reaches the missing code and HardFaults (it looked like a crash in the
   uploaded program). Write the whole flash instead - firmware, slot and state in one
   image - as `tools/synccpu.py` does; `flash erase_address` refuses the 128-byte page
@@ -576,6 +577,19 @@ Measured 2026-10-27 on scream-rx (re-measure):
   its ring once per analysis frame (`syncDrawWaves`, 432 short calls) and the LEDs only
   read it; drawn per LED, in the pass that lights it, it ran 1880-1889 (20% dimmer
   than pulse).
+- **Three pattern slots again** (evening): slot 2 at 0x08006D80, below slot 1
+  (0x08007380) and slot 0 (0x08007980), so code ends by 28,032 B (production 27,824).
+  Custom 2 is mode 10, which makes sync mode 11 and basic 12 (one higher than in the
+  entries above); sync variant 5 is slot 2, interference and synthwave are 6 and 7. A
+  tail saved before this is in the 2-slot layout: put back as is, its state page boots
+  the wrong mode, so move modes 10 and up one higher, sync variants 5/6 to 6/7, and
+  rehash. L, back to back with 34aacf9 (`passrate.py`): modes 0-9 and basic +0.1-0.3%,
+  sync waves 3916-3918 against 3926, pulse 2375-2378 against 2367 passes/s, custom 2
+  with its slot empty 322. `synccpu.py --builtin`: 2386 against 2378 passes/s, 63.8
+  frames/s for both. `synccpu.py` writes both earrings: with someone's program on one,
+  import it and set `synccpu.PORTS` to the other only. A 1530 B program (patternc's
+  largest under the 1532 B limit) written into slot 2 over SWD loads in custom 2, as
+  sync variant 5 and after a reboot.
 - **What both microphones heard, frame by frame** (`tools/syncbands.py record`,
   `-tags syncboot`, `--elf` the image on the earrings): ~100 reads/s of the
   pipeline's band energies and comb state per earring, enough for every 64/s frame

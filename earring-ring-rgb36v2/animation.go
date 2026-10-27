@@ -23,6 +23,7 @@ const (
 	modeVUMeter
 	modeCustom0
 	modeCustom1
+	modeCustom2
 	modeSync
 	modeBasic
 	modeLast
@@ -46,7 +47,8 @@ const variantsPerMode = "\x03" + // modeTrace
 	"\x0d" + // modeVUMeter (numStaticColors)
 	"\x00" + // modeCustom0: capped by the pattern itself
 	"\x00" + // modeCustom1: ditto
-	"\x07" + // modeSync: waves, pulse, classic, custom slot 0 and 1, interference, synthwave (see syncAnimate)
+	"\x00" + // modeCustom2: ditto
+	"\x08" + // modeSync: waves, pulse, classic, custom slot 0, 1 and 2, interference, synthwave (see syncAnimate)
 	"\x05" + // modeBasic (numBasicPatterns)
 	"\x00" + // modeLast (not a mode)
 	"\x00" + // modeTest
@@ -55,7 +57,7 @@ const variantsPerMode = "\x03" + // modeTrace
 // Cycle to the next variant within a mode.
 func animationNextVariant(mode, variant int) int {
 	variant++
-	if mode == modeCustom0 || mode == modeCustom1 {
+	if mode == modeCustom0 || mode == modeCustom1 || mode == modeCustom2 {
 		// Custom modes have their variant defined in the program itself.
 		if variant > customPattern.MaxVariant() {
 			variant = 0
@@ -97,6 +99,8 @@ func animate(mode, variant, led, frame int) Color {
 		return showCustom(led, frame*millisPerFrame, 0)
 	case modeCustom1:
 		return showCustom(led, frame*millisPerFrame, 1)
+	case modeCustom2:
+		return showCustom(led, frame*millisPerFrame, 2)
 	case modeSync:
 		c := syncAnimate(led, variant)
 		if storedState[stateOffsetSyncSwapRB] != 0 {
@@ -145,7 +149,7 @@ func newFrame(mode, variant, frame int) {
 		volumeHistory[volumeHistoryIndex] = vol
 	case modeSparkle:
 		sparkleNextFrame(variant)
-	case modeCustom0, modeCustom1, modeQA:
+	case modeCustom0, modeCustom1, modeCustom2, modeQA:
 		customNextFrame(frame*millisPerFrame, variant)
 	case modeSync:
 		syncNextFrame(variant)
@@ -162,6 +166,8 @@ func initMode(mode int) {
 		customLoadPattern(0, true)
 	case modeCustom1:
 		customLoadPattern(1, true)
+	case modeCustom2:
+		customLoadPattern(2, true)
 	}
 }
 

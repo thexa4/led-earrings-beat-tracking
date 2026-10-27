@@ -12,10 +12,10 @@ pattern in the normal web editor; nothing about uploading changes.
 
 ## Running your pattern in sync mode
 
-1. Upload your pattern to one of the two custom pattern modes as usual. If it
+1. Upload your pattern to one of the three custom pattern modes as usual. If it
    has variants, pick the one you want there with the variant button.
 2. Press the mode button until you reach sync mode. It comes right after the
-   two custom pattern modes and starts with red, green and blue waves that
+   three custom pattern modes and starts with red, green and blue waves that
    run round the ring with the music.
 3. Press the variant button to step through the sync mode variants:
 
@@ -26,16 +26,18 @@ pattern in the normal web editor; nothing about uploading changes.
    | 3 | **classic**: the music's color scheme with a short flash on every beat |
    | 4 | **your pattern** from the first custom mode, with the music data |
    | 5 | **your pattern** from the second custom mode, with the music data |
-   | 6 | **interference pulse**: two rainbow waves running around the ring at slightly different speeds, with a white flash on the beat that fades out until the next one |
-   | 7 | **synthwave**: the ring strobes red and cyan, white for the first quarter of every beat |
+   | 6 | **your pattern** from the third custom mode, with the music data |
+   | 7 | **interference pulse**: two rainbow waves running around the ring at slightly different speeds, with a white flash on the beat that fades out until the next one |
+   | 8 | **synthwave**: the ring strobes red and cyan, white for the first quarter of every beat |
 
 Hold the variant button for about a second to swap red and blue in every
 sync variant, your patterns included. Hold it again to swap them back. The
 earring remembers the swap when it is switched off.
 
-When you switch to variant 4 or 5 the earring waits about a second before
+When you switch to variant 4, 5 or 6 the earring waits about a second before
 it starts your pattern, just like the custom pattern modes do. If a slot is
-empty you see a single blue LED.
+empty you see blue LEDs instead: one for the first custom mode, two for the
+second, three for the third.
 
 Patterns that don't know about any of this run fine in sync mode too: they
 just ignore the music. They also run exactly as before in the custom

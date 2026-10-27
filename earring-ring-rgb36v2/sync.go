@@ -93,7 +93,7 @@ var (
 	syncWaves    [len(syncBands) * syncWaveSlots]syncWave // band i's from i*syncWaveSlots
 	syncWaveRing [numLEDs]Color
 
-	// Uploaded programs in sync mode (variants 3 and 4, see syncNextFrame).
+	// Uploaded programs in sync mode (variants 3 to 5, see syncNextFrame).
 	syncSlot        int // custom slot loaded into animationBuf, plus one (0: none)
 	syncCustomFrame int // syncAnimFrame/2 at the program's last nextFrame
 
@@ -422,8 +422,9 @@ var _ [numNoisePatterns - syncdsp.NumPatterns]struct{} // every pattern has a pa
 //	2  classic: the music-chosen palette with a flash on each beat
 //	3  the uploaded program in custom slot 0, with the sync data block live
 //	4  the same for slot 1
-//	5  interference pulse (patterns.go)
-//	6  synthwave (patterns.go)
+//	5  the same for slot 2
+//	6  interference pulse (patterns.go)
+//	7  synthwave (patterns.go)
 //
 // A long press on the variant button swaps red and blue in all of them
 // (see animate).
@@ -432,7 +433,7 @@ var _ [numNoisePatterns - syncdsp.NumPatterns]struct{} // every pattern has a pa
 // checking earrings against each other (section hash as a color, a dot
 // chasing the beat); it is an uploadable program now, in SYNC-PROGRAMS.md.
 func syncAnimate(led, variant int) Color {
-	if uint(variant-3) < 2 {
+	if uint(variant-3) < 3 {
 		return showCustom(led, syncMillis(), variant-3)
 	}
 
@@ -494,14 +495,14 @@ func syncMillis() int {
 }
 
 // syncNextFrame runs once per main-loop frame in sync mode. For variants 3
-// and 4 it loads the uploaded program from that custom slot (on entering the
+// to 5 it loads the uploaded program from that custom slot (on entering the
 // variant, with the same one-second grace as the custom modes) and calls its
 // nextFrame every other analysis frame: 32 times a second, near the ~27 of
 // the custom modes, so programs that count frames run at about their usual
 // speed. The program runs with the variant it last had in its custom mode.
 func syncNextFrame(variant int) {
 	slot := variant - 3
-	if slot < 0 || slot > 1 {
+	if slot < 0 || slot > 2 {
 		return
 	}
 	if syncSlot != slot+1 {

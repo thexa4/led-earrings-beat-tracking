@@ -158,7 +158,7 @@ func main() {
 				}
 				if variantBtnFramesPressed == 30 {
 					slot := mode - modeCustom0
-					if slot >= 0 && slot < 2 {
+					if slot >= 0 && slot < 3 {
 						// Long press is to receive data, not to switch to the
 						// next variant.
 						variantBtnFramesPressed = 0
