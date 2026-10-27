@@ -22,17 +22,20 @@ import (
 // oversampling, and starts TIM22 + DMA circular capture of length samples
 // into the 16-bit buffer at mar.
 //
-// The caller must have switched to the intended system clock already: the
-// ADC runs from PCLK2 and TIM22 from PCLK, so the sample rate is
+// The caller must have switched to the intended system clock already. TIM22
+// runs from PCLK, so the sample rate is
 //
 //	fs = PCLK / (2 * (psc + 1))    (TIM22 ARR=1, TRGO on every update)
 //
-// ccr is written verbatim to ADC->CCR. dataRecv passes 0 (ADCPRE=AHB/1: at
-// MSI ~4.2 MHz the ~400-cycle oversampled conversion takes ~95 us, just
-// inside its 100 us sample period). Sync passes ADCPRE=AHB/2 (1<<28): at
-// 16 MHz that is an 8 MHz ADC clock, under the 14 MHz maximum while the
-// ~58 us conversion still fits the 62.5 us period - /1 would be out of
-// spec, /4 would miss triggers.
+// CFGR2 below leaves CKMODE=0, which per RM0377 is the asynchronous clock
+// (HSI16) divided by CCR.PRESC. ccr is written verbatim to ADC->CCR; the
+// datasheet limit on the ADC clock is 16/8/4 MHz in voltage range 1/2/3. A
+// 32x oversampled conversion takes 32 * (12.5 + 1.5) = 448 ADC cycles.
+// Both callers run range 2 and pass PRESC=/2: 8 MHz, 56 us of dataRecv's
+// 100 us and sync's 62.5 us period. Measured on sync's rate: /4 misses every
+// other trigger, so the prescaler is HSI16's (the old 8.8 kSPS at MSI, once
+// read as the ADC running from PCLK, was the CPU starving).
+// The clock must be set before ADEN; see below.
 //
 // Both callers must share this one copy: -opt=2 re-inlines (and so
 // re-duplicates) it into each of them otherwise.
@@ -50,6 +53,15 @@ func startCapture(mar uint32, length int, psc uint32, ccr uint32) {
 	stm32.RCC.SetCFGR_PPRE2(stm32.RCC_CFGR_PPRE2_Div1)
 	stm32.RCC.SetAPB2ENR_ADCEN(1)
 
+	// The clock (CCR.PRESC, CFGR2.CKMODE) takes effect only if written while
+	// the ADC is disabled: written after ADEN, PRESC reads back but the ADC
+	// keeps its old clock (measured: sync at /256 still sampled 16 kSPS). A
+	// reset first, as mic mode may have left the ADC on. Everything else in
+	// CCR is zero, in particular LFMEN off.
+	stm32.RCC.APB2RSTR.Set(stm32.RCC_APB2RSTR_ADCRST)
+	stm32.RCC.APB2RSTR.Set(0)
+	stm32.ADC.CCR.Set(ccr)
+
 	// Power on ADC: clear ADRDY, enable, wait until ready.
 	stm32.ADC.ISR.Set(stm32.ADC_ISR_ADRDY)
 	stm32.ADC.CR.Set(stm32.ADC_CR_ADEN)
@@ -58,10 +70,6 @@ func startCapture(mar uint32, length int, psc uint32, ccr uint32) {
 
 	// Microphone on channel 8 (PB0).
 	stm32.ADC.CHSELR.Set(1 << 8)
-
-	// ADC prescaler (see the clock note above); everything else zero, in
-	// particular LFMEN off.
-	stm32.ADC.CCR.Set(ccr)
 
 	// Enable TIM22 as the sample trigger: prescale so it counts at twice the
 	// sample rate, wraparound every other clock, TRGO on update.

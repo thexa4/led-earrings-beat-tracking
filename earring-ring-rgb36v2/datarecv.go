@@ -5,22 +5,23 @@ import (
 	"machine"
 	"unsafe"
 
-	"codeberg.org/maaike328p/datatrans"
-	"codeberg.org/maaike328p/datatrans/dsp"
+	"github.com/aykevl/things/earring-ring-rgb36v2/screamrx"
 )
 
 const (
-	// possible values for 4.2MHz: 12000 14000 15000 25000 28000 30000 35000 42000 50000 etc
-	// possible values for 4.0MHz: 10000 16000 20000 25000 40000 50000
-	// possible values for 8.0MHz: 10000 16000 20000 25000 32000 40000 50000
-	// but since we need calibration anyway, really any value would be fine
 	sampleRate = 10000
 
-	// number of samples per window we do frequency analysis on
-	windowSize = sampleRate / datatrans.SymbolsPerSecond
+	// number of samples per window we do frequency analysis on (one symbol)
+	windowSize = sampleRate / 50
 
-	systemClock    = 4.2e6
-	clockPrescaler = uint32(systemClock/sampleRate/2 - 1)
+	// TIM22 prescaler for 10 kSPS from the 16 MHz HSI16 clock the receiver
+	// runs at: 16 MHz / (2 * (799+1)). One step is 0.125%.
+	clockPrescaler = 16e6/sampleRate/2 - 1
+
+	// Largest PSC trim, in steps: HSI16 is factory trimmed to +-1% at 25 C
+	// and drifts further with temperature, and the sender's clock adds its
+	// own error. +-20 steps is +-2.5%.
+	maxTrim = 20
 )
 
 // Size of a program slot in flash memory.
@@ -44,11 +45,15 @@ var adcData [windowSize * 2]uint16
 // Two extra elements: the last one to serve as a special "stop" value and the
 // one after that because the Goertzel pair code reads two values at once.
 //
-// To save RAM this is overlaid on the tail of animationBuf, which is free
-// during a data receive: the fountain decoder reconstructs the program into
-// animationBuf[1:] up to maxProgramSize bytes (byte 1536), while this overlay
-// starts at byte 4*(animationBufSize/4 - (windowSize+2)) = 1748, so the two
-// never overlap (checked by the array assertion below). The Goertzel and copy
+// To save RAM this is overlaid on the tail of animationBuf: the fountain
+// decoder is given only animationBuf[1:fountainBufEnd], the words between the
+// size/hash header word and this overlay (bytes 4..1748), checked below to
+// hold a whole program. It must not get all of animationBuf[1:]: the fountain
+// stores up to 48 packets, filling its highest slot first, so for programs
+// over 1152 B its top slots would land on this window and be overwritten on
+// every symbol (TestFountainWindowOverlap in scream/tools/screamcheck). With
+// 436 words a 1532 B program gets 36 slots instead of 48, which slows a
+// transfer by ~2-4% in screamcheck. The Goertzel and copy
 // code receive the buffer as an ordinary slice argument, so unlike an overlay
 // of the sync pipeline (which is fed from the same loop that reads the DMA
 // buffer) the aliasing cast costs the hot loops nothing. receiveData sets
@@ -56,9 +61,11 @@ var adcData [windowSize * 2]uint16
 // overlay does not come pre-zeroed.
 const adcDataNormWords = windowSize + 2
 
-var _ [len(animationBuf) - maxProgramSize/4 - adcDataNormWords]int8 // disjoint
+const fountainBufEnd = len(animationBuf) - adcDataNormWords
 
-var adcDataNormalized = unsafe.Slice((*int32)(unsafe.Pointer(&animationBuf[len(animationBuf)-adcDataNormWords])), adcDataNormWords)
+var _ [fountainBufEnd - 1 - maxProgramSize/4]int8 // the fountain holds a program
+
+var adcDataNormalized = unsafe.Slice((*int32)(unsafe.Pointer(&animationBuf[fountainBufEnd])), adcDataNormWords)
 
 func adcDataWriteIndex() uint32 {
 	return uint32(len(adcData)) - stm32.DMA1.CH[0].NDTR.Get()
@@ -70,83 +77,80 @@ func adcDataWriteIndex() uint32 {
 // mode has no path into dataRecv), and both re-init their state on entry
 // (startSync -> Pipeline.Init, dataRecv -> Decoder.Initialize), so neither
 // ever reads the other's leftovers. syncPipe is the larger of the two, and
-// both are plain integer structs, so the cast is safe.
+// both are plain integer structs (the decoder's one slice points into
+// animationBuf), so the cast is safe.
 //
-// This overlay saves 592 B of RAM. Unlike the rejected animationBuf overlay
-// (which aliased the DMA buffer and cost the feed loop its register
-// allocation), neither loop reads the other's storage here: the receive
-// loop consumes adcDataNormalized, and sync never runs during a receive.
-var decoder = (*datatrans.Decoder)(unsafe.Pointer(&syncPipe))
+// Unlike the rejected animationBuf overlay (which aliased the DMA buffer and
+// cost the feed loop its register allocation), neither loop reads the
+// other's storage here: the receive loop consumes adcDataNormalized, and
+// sync never runs during a receive.
+var decoder = (*screamrx.Decoder)(unsafe.Pointer(&syncPipe))
 
-var _ [unsafe.Sizeof(syncPipe) - unsafe.Sizeof(datatrans.Decoder{})]byte
+var _ [unsafe.Sizeof(syncPipe) - unsafe.Sizeof(screamrx.Decoder{})]byte
 
-var adcWriteWindow uint8 = 0 // 0 or 1 to indicate current window
+// The receiver reads the circular DMA buffer by software index, so a window
+// can start at any sample (the decoder moves it by Adjust to stay on the
+// symbol grid). adcWritten counts the samples the DMA has written since the
+// capture started; adcRead is where the next window starts, on that count.
+// (The old receiver moved the grid by stopping the DMA for a few sample
+// periods, which BENCH.md forbids: the ADC overruns and the ring can freeze.)
+var (
+	adcBase, adcLast uint32 // adcWritten bookkeeping: whole laps, last index
+	adcRead          uint32
+	dcOffset         uint32
+	// Overruns counts windows the DMA had already overwritten when they were
+	// copied (the decoder fell more than a window behind).
+	adcOverruns uint16
+)
 
-var dcOffset uint32
-
+// adcWritten returns the monotonic DMA write count. It must be called at
+// least once per lap of adcData (40 ms), which the receive loop does: a
+// window takes 20 ms and the decoder keeps up with it.
+//
 //go:noinline
-func adcDelaySamples(samples uint32) {
-	if samples != 0 {
-		stm32.DMA1.CH[0].CR.ClearBits(stm32.DMA_CH_CR_EN)
-		stm32.DMA1.CH[0].CR.Get()
-		for range samples {
-			waitSamplePeriod()
+func adcWritten() uint32 {
+	i := adcDataWriteIndex()
+	if i >= uint32(len(adcData)) {
+		i = 0 // NDTR reads 0 for an instant before it reloads
+	}
+	if i < adcLast {
+		adcBase += uint32(len(adcData))
+	}
+	adcLast = i
+	return adcBase + i
+}
+
+// adcNextWindow waits until the window at adcRead is complete and copies it,
+// less the previous window's mean (the DC offset) and shifted right by the
+// decoder's gain, into adcDataNormalized.
+// It reports false if part of the window had been overwritten before the
+// copy finished; the window is then moved to the newest samples.
+//
+//go:noinline
+func adcNextWindow() bool {
+	for adcWritten() < adcRead+windowSize {
+	}
+	src := adcRead % uint32(len(adcData))
+	dc := int32(dcOffset)
+	gain := decoder.Gain()
+	sum := uint32(0)
+	for i := range windowSize {
+		v := uint32(adcData[src])
+		src++
+		if src == uint32(len(adcData)) {
+			src = 0
 		}
-
-		stm32.DMA1.CH[0].CR.SetBits(stm32.DMA_CH_CR_EN)
-
-		// This apparently helps to avoid a stuck DMA??
-		// Though it doesn't seem to be needed anymore.
-		//if stm32.DMA1.CH[0].CR.Get()&stm32.DMA_CH_CR_EN == 0 {
-		//	for {
-		//	}
-		//}
+		adcDataNormalized[i] = (int32(v) - dc) >> gain
+		sum += v
 	}
-}
-
-// dmaInWindow reports 1 while the DMA is writing into window w (0 or 1) of
-// adcData. Out of line for the same reason as waitSamplePeriod.
-//
-//go:noinline
-func dmaInWindow(w uint32) uint32 {
-	if adcDataWriteIndex() >= windowSize {
-		return w
+	dcOffset = sum / windowSize
+	ok := adcWritten() <= adcRead+uint32(len(adcData))
+	adcRead += windowSize
+	if !ok {
+		adcOverruns++
+		adcRead = adcWritten() - windowSize
 	}
-	return w ^ 1
-}
-
-// waitSamplePeriod waits for the sample timer to wrap once. Kept out of line:
-// inlined, LLVM unrolls both spin loops and the loop around them four ways each.
-//
-//go:noinline
-func waitSamplePeriod() {
-	for stm32.TIM22.CNT.Get() != 0 {
-	}
-	for stm32.TIM22.CNT.Get() == 0 {
-	}
-}
-
-// Wait until the write pointer is in the next window, and update
-// adcDataNormalized so it contains the data for the window that's ready.
-//
-//go:noinline
-func adcDataNextWindow(delayBefore uint32) {
-	// The DMA is filling window w; wait until it has moved on to the other one.
-	w := uint32(adcWriteWindow)
-	if dmaInWindow(w) == 0 {
-		// Shouldn't be in the next window already!
-		println("overflow!")
-	}
-	for dmaInWindow(w) != 0 {
-	}
-	adcDelaySamples(delayBefore)
-	adcWriteWindow = uint8(w ^ 1) // next window
-	rawSamples := adcData[w*windowSize : w*windowSize+windowSize]
-
-	// Adjust samples by DC offset.
-	// At the same time, also sum up all the samples it reads so we can
-	// calculate the DC offset for the next window.
-	dcOffset = dsp.CopyWithOffset(rawSamples, adcDataNormalized[:], dcOffset)
+	return ok
 }
 
 // setIndicatorPin is Pin.Configure for the A1-A12 pins (all on GPIOA, whose
@@ -186,20 +190,17 @@ func dataRecv(slot int) {
 		A8.High()
 	}
 
-	// Enable HSI16.
-	stm32.RCC.CR.SetBits(stm32.RCC_CR_HSI16ON)
-
-	// Switch system clock to 4.2MHz.
-	stm32.RCC.SetICSCR_MSIRANGE(stm32.RCC_ICSCR_MSIRANGE_Range6)
-
-	// Capture: the double symbol buffer (windowSize*2 samples) at 10 kSPS,
-	// ADCPRE=AHB/1 (ccr=0): at this clock the ADC is within spec and the 32x
-	// oversampled conversion (~95 µs) just fits the 100 µs sample period.
-	// See capture.go for the shared setup this replaced.
-	//
-	// Debug: slow down the ADC by raising the prescaler, e.g. 0xffff.
+	// System clock: HSI16 at voltage range 2 with one wait state, and the
+	// ADC on its asynchronous HSI16 clock divided by 2 (8 MHz; CKMODE=0).
+	// The old receiver ran the core from MSI at 4.2 MHz in range 3 with the
+	// ADC at 16 MHz, four times the range 3 limit; this is in spec, and the
+	// decoder needs the cycles. A 32x oversampled conversion takes 448 ADC
+	// cycles, 56 us of the 100 us sample period. Recorded with screamdump
+	// (configuration 2), the noise floor is that of the old setting (MAD
+	// 16-20 codes in every configuration).
+	hsi16Up(stm32.PWR_CR_VOS_V1_5)
 	startCapture(uint32(uintptr(unsafe.Pointer(&adcData))), len(adcData),
-		clockPrescaler, 0)
+		clockPrescaler, 1<<stm32.ADC_CCR_PRESC_Pos)
 
 	// Special marker used by the Goertzel implementation to know this is the
 	// end of the array.
@@ -207,23 +208,13 @@ func dataRecv(slot int) {
 	adcDataNormalized[windowSize+1] = 0 // pair code reads two at once; overlay is not zeroed
 
 	// Receive the data.
-	decoder.Initialize(animationBuf[1:], maxProgramSize, sampleRate)
+	decoder.Initialize(animationBuf[1:fountainBufEnd], maxProgramSize, sampleRate,
+		windowSize*256/(clockPrescaler+1))
 	receiveData(slot)
 
 	// Disable capture, then restore the idle clock.
 	stopCapture()
-
-	// Switch back to MSI.
-	stm32.RCC.CFGR.ReplaceBits(stm32.RCC_CFGR_SWS_MSI, stm32.RCC_CFGR_SW_Msk, 0)
-	for stm32.RCC.CFGR.Get()&stm32.RCC_CFGR_SW_Msk != stm32.RCC_CFGR_SWS_MSI {
-	}
-	stm32.RCC.SetCFGR_HPRE(stm32.RCC_CFGR_HPRE_Div1)
-
-	// Disable HSI16
-	stm32.RCC.CR.ClearBits(stm32.RCC_CR_HSI16ON)
-
-	// Switch system clock back to default.
-	stm32.RCC.SetICSCR_MSIRANGE(defaultMSIRANGE)
+	hsi16Down()
 
 	// Restore the LEDs.
 	// Note: have to set the below two as input due to a bug (pull mode is not
@@ -239,26 +230,28 @@ func receiveData(slot int) {
 
 	button2WasReleased := false // true once button 2 was released once (for exiting the receiver)
 	whiteWasOn := false         // used for blinking LED
+	trim := int32(0)
 
-	// Wait for the first full symbol.
-	adcDataNextWindow(0)
+	adcBase, adcLast = 0, 0
+	adcRead = adcWritten()
+	adcNextWindow() // primes the DC offset
 	for {
-		result := decoder.ProcessSamples(adcDataNormalized[:])
+		if !adcNextWindow() {
+			decoder.Reset()
+		}
+		result := decoder.Process(adcDataNormalized[:])
+		adcRead += uint32(int32(decoder.Adjust()))
+		telemWindow() // -tags screamtelem only
 
-		// Adjust timer prescaler, to calibrate to the audio source.
-		// This is also used to continuously adjust the frequency
-		trim := stm32.TIM22.PSC.Get()
-		if adj := decoder.SpeedAdjust(); adj < 0 {
-			trim = min(clockPrescaler+4, trim+1)
-			stm32.TIM22.PSC.Set(trim)
-		} else if adj > 0 {
-			trim = max(clockPrescaler-4, trim-1)
-			stm32.TIM22.PSC.Set(trim)
+		// Follow the sender's clock.
+		if t := int32(decoder.RateTrim()); t != 0 {
+			trim = max(-maxTrim, min(maxTrim, trim+t))
+			stm32.TIM22.PSC.Set(uint32(clockPrescaler + trim))
 		}
 
 		// Decoder had to stop for some reason (error or fully received).
 		if result < 0 {
-			if result == datatrans.ErrCodeReceived {
+			if result == screamrx.StatusReceived {
 				// Fully received! Show green LEDs (while saving the binary):
 				setIndicatorPin(A10, machine.PinInput)
 				setIndicatorPin(A11, machine.PinInputPulldown)
@@ -272,9 +265,8 @@ func receiveData(slot int) {
 				}
 				return
 			}
-			decoder.Reset()
 			// Some error, restart.
-			adcDataNextWindow(0)
+			decoder.Reset()
 			continue
 		}
 
@@ -287,9 +279,6 @@ func receiveData(slot int) {
 			setIndicatorPin(A11, machine.PinInput)
 			whiteWasOn = false
 		}
-
-		// Wait until the next symbol arrives.
-		adcDataNextWindow(uint32(result))
 
 		// Exit on button2 press (but don't exit immediately when button2 is
 		// still pressed due to the long press to enter receiving mode).

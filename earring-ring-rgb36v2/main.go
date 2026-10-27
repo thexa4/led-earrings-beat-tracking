@@ -16,6 +16,10 @@ var modeVariants = storedState[stateOffsetVariants : stateOffsetVariants+modeLas
 
 func main() {
 	initHardware()
+	screamDump()  // -tags screamdump only: never returns
+	screamFeed()  // -tags screamfeed only: never returns
+	screamTelem() // -tags screamtelem only: never returns
+	syncBoot()    // -tags syncboot only: start in sync mode
 
 	// Zero all LEDs.
 	clearLEDs()

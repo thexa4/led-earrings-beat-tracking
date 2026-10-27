@@ -376,7 +376,7 @@ are not a substitute for §1–§2 when you make one.
 | Why a probe is trustworthy / what it destroys | `sync_micdump.go`, `sync_micdump_off.go` headers |
 | Register-level read traps (write-locks, poll-precedence bugs) | `tools/adcq.py`, `tools/freeze.py`, `tools/adcregs.py` docstrings |
 | Why a past conclusion was reached (and what it rested on) | `tools/paircapture.py`, `tools/specdump.py`, `tools/sync_ceiling.py` docstrings |
-| Actual ADC/DMA/timer configuration in use | `sync.go` (`startSync`/`stopSync`), `datarecv.go`, `bitbang.h` |
+| Actual ADC/DMA/timer configuration in use | `sync.go` (`startSync`/`stopSync`), `datarecv.go`, `capture.go`, `clock.go`, `bitbang.h` |
 | AGC / band / selector constants | `syncdsp/consts.go`, `syncdsp/pipeline.go` |
 | Pins, electrical limits, supply current, ADC accuracy | `datasheet/DS_stm32l031g6.md` — see §12 for a line-number index |
 | Register addresses, bit definitions, DMA request mapping | **RM0377** (reference manual) — not in the datasheet at all, see §12 |
@@ -454,3 +454,61 @@ entries this project actually needs. Two caveats before trusting them:
 | 3249 | §6.3.19 comms — I²C 3251, SPI 3289 | interface timing if a peripheral is added |
 | 3751 | §7.5 UFQFPN28 package (marking at 3824) | the footprint this part uses; land pattern and dimensions |
 | 4045 | §7.8 thermal characteristics | junction temperature limits from package θ_JA — the check behind a "works cold, drifts warm" report |
+
+## 13. Scream (pattern transfer) on the bench
+
+The data receiver (`datarecv.go`, decoder in `earring-ring-rgb36v2/screamrx`) has its
+own builds and tools. Unlike most of this file, they are in the **main** checkout:
+`earring-ring-rgb36v2/tools/screamdump.py` and `tools/screamtelem.py`, both built on
+the debug branch's `telem.OpenOCD`. Build each with
+`tinygo build -tags <tag> -target=./stm32l0x1.json -opt=2 -panic=trap`, build the ELF from
+the same tree, and check them with `imgcmp.py` before trusting any symbol address (§6).
+
+| tag | what the earring does | read with |
+|---|---|---|
+| `screamdump` | boots into the receiver's capture path and records the microphone into a µ-law RAM ring; the host picks one of three clock configurations at run time (header of `screamdump.go`) | `tools/screamdump.py` → `L.wav`, `R.wav`, `meta.json` |
+| `screamfeed` | runs only the decoder; the host writes each 200-sample window over SWD and reads back the result | `go test ./screamrx -run TestFeedTarget` with `FEED=localhost:4445 FEEDELF=… SCEN=…` |
+| `screamtelem` | runs the real `dataRecv(-1)` in a loop and counts syncs, headers, packets ok/repaired/failed, overruns and receptions | `tools/screamtelem.py --elf … --seconds … --play …` |
+
+None of them writes flash or sleeps, so SWD stays up. `screamfeed` is the check that the
+firmware's decoder (TinyGo code generation, the Goertzel assembly, which the host replaces
+with C) is bit-exact with the host tests, and it reports cycles per window against the
+320 000 a 20 ms symbol has at 16 MHz.
+
+`screamdump.py` reads only the bytes written since the last poll and bounds them with a
+counter read before and after (§1), so a lapped stretch is recorded as lost, not spliced.
+Both earrings record at once (10 kB/s each). Replay a recording into the decoders with
+`REPLAY=<dir>/L.wav go test ./screamrx -run 'TestReplay|TestDespikeWav' -v`; the stream
+it is aligned against is regenerated from the seed, so every bit is known.
+
+Things that made recordings lie, measured once (2026-10, re-measure):
+
+- **The player is not the clock.** Audio went through an AirPlay speaker: ~1.9 s from
+  play to sound, and a multi-second dropout early in a 60 s file after which the stream
+  came back shifted by ~600 samples. Align by chunks, never one offset for the whole
+  file.
+- **At bench distance the scream is below the noise.** Per-tone amplitude was 0.1-0.4
+  codes against 5-10 codes of in-band noise: no decoder decodes that, and it says
+  nothing about reception near a speaker. Near-speaker runs need someone to hold the
+  earring there.
+- **R has ADC spikes, L doesn't.** 1000-4000-code single samples (sometimes pairs or
+  triples) on ~2 % of R's samples, getting denser during the run. The receiver's impulse
+  filter takes R's rms from ~500 to L's ~90; without it, R's Goertzel output is noise.
+- The noise floor (MAD 16-20 codes) was the same in all three clock configurations,
+  but that says nothing about the ADC clock: `startCapture` wrote CCR.PRESC after
+  ADEN, which the ADC ignores (the value reads back), so every configuration ran
+  the ADC at 16 MHz. Fixed by writing the clock before ADEN; proof is the sample
+  rate, not the register (PRESC /4 at 16 kSPS must miss every other trigger).
+- **Sync's sample count.** `-tags syncboot` boots into sync mode and counts DMA
+  ring wraps (`main.syncWraps`) next to what the pipeline consumed
+  (`syncAnimFrame*250+syncFed`). R's HSI16 runs 0.5 % slow (15.92 kSPS). Before
+  the fix in `syncPoll` the pipeline counted 1 % fewer samples than the ADC wrote:
+  frames ran past 250 by the last poll's overshoot. TinyGo's `DMA_ISR_TCIF1` is
+  channel 2's flag (0x20); channel 1's is bit 1.
+- **Profiling the target.** `halt; resume` from a second telnet session while
+  `TestFeedTarget` runs, with the PCs mapped through the ELF's symbols and DWARF
+  lines, found half of Process in the soft divide (`__aeabi_idiv`, a `/6` per sample)
+  and a third more cycles without the flash prefetch. The halt message is broadcast to
+  every session, so a reader must skip lines that are not its own reply.
+- The decoder agreed bit for bit with the host over SWD (`TestFeedTarget`, headphone
+  and spk10cmR, ~400 windows each).

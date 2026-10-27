@@ -14,10 +14,11 @@ package main
 // still worked at that rate - every device made the same mistake, and the
 // agreement is relative - but it put all frame-unit constants in syncdsp
 // 1.82x off their documented wall time. At 16 MHz the 62.5 us sample period
-// is real: TIM22 divides down to exactly 16 kHz and the ADC runs
-// synchronously from PCLK. (16 MHz needs voltage range 1, which costs
-// battery current - accepted; the frame-unit constants in syncdsp are tuned
-// for the true 64 fps frame rate, see PARTY-SYNC.md §11.1.)
+// is real: TIM22 divides HSI16 down to 16 kHz (measured 15.92 kSPS on R:
+// HSI16 is 0.5 % slow there) and the ADC converts from HSI16/2 in 56 us.
+// (16 MHz needs voltage range 2 and one flash wait state, which cost battery
+// current - accepted; the frame-unit constants in syncdsp are tuned for the
+// true 64 fps frame rate, see PARTY-SYNC.md §11.1.)
 //
 // Running above the idle clock has two consequences the loop structure must
 // respect:
@@ -29,7 +30,9 @@ package main
 //     mode ignores that counter: syncAnimate reads syncAnimFrame, which
 //     advances once per analysis frame instead.
 //
-//   - A full pipeline frame takes ~20k cycles (~1.3 ms at 16 MHz). Running
+//   - A full pipeline frame takes ~185k cycles (~11.5 ms at 16 MHz, three
+//     quarters of the CPU: PC-sampled over SWD, with the flash prefetch;
+//     ~10 % more without it). Running
 //     that in one burst would freeze the multiplexer that long, holding one
 //     LED group on visibly. So samples are fed incrementally: each main-loop
 //     iteration hands the pipeline whatever the DMA has written since the
@@ -52,11 +55,11 @@ const (
 	// 15996.6 Hz on paper but 8.8 kSPS in practice - see the file comment).
 	syncPSC = 499
 
-	// Maximum samples fed to the pipeline per main-loop iteration. At 16 MHz
-	// and 16 kSPS the loop needs ~16000/loop-rate ≈ 11 samples per iteration,
-	// so this cap only limits catch-up bursts (24 samples ≈ 1.6k cycles ≈ one
-	// refresh period, which is invisible). At 4.2 MHz it *was* the steady
-	// state (24 × ~370 Hz ≈ the 8.8 kSPS the starved CPU managed).
+	// Maximum samples fed to the pipeline per main-loop iteration: it bounds
+	// catch-up bursts, so the multiplexer is never held for long. Raising it
+	// to 32 or 200 did not change what the pipeline consumed (measured with
+	// -tags syncboot): at 16 MHz the loop keeps up. At 4.2 MHz it *was* the
+	// steady state (24 × ~370 Hz ≈ the 8.8 kSPS the starved CPU managed).
 	syncFeedCap = 24
 )
 
@@ -106,49 +109,20 @@ func startSync() {
 	syncFed = 0
 	syncRunning = true
 
-	// System clock: HSI16 (exactly 16 MHz), so PCLK is 16 MHz for TIM22 and
-	// the ADC (which runs synchronously from PCLK via CKMODE=0; note that
-	// 0 does *not* select HSI16 async as the old comment here believed - the
-	// measured 8.8 kSPS at MSI Range6 proves it).
-	//
-	// 16 MHz needs voltage range 1 (the idle config runs range 3, whose spec
-	// maximum of 2 MHz sync at 4.2 MHz was already quietly over). Order: raise
-	// the scale and wait for the regulator (VOSF clears when ready), give the
-	// flash its wait state, then switch over. Power is the bench supply here;
-	// this trade is not for battery firmware.
-	// TinyGo's device/stm32 masks for this part are already shifted into
-	// place (HSI16ON_Msk=0x1 at Pos 0, HSI16RDYF_Msk=0x4 at Pos 2): use them
-	// directly - shifting again by _Pos points at the wrong bit.
-	stm32.RCC.CR.SetBits(stm32.RCC_CR_HSI16ON_Msk)
-	for stm32.RCC.CR.Get()&stm32.RCC_CR_HSI16RDYF_Msk == 0 {
-	}
-	stm32.RCC.APB1ENR.SetBits(stm32.RCC_APB1ENR_PWREN_Msk)
-	stm32.PWR.CR.ReplaceBits(stm32.PWR_CR_VOS_V1_8, stm32.PWR_CR_VOS_Msk,
-		stm32.PWR_CR_VOS_Pos)
-	waitForVOS()
-	stm32.RCC.APB1ENR.ClearBits(stm32.RCC_APB1ENR_PWREN_Msk)
-	stm32.FLASH.SetACR_LATENCY(stm32.Flash_ACR_LATENCY_WS1)
-	stm32.RCC.CFGR.ReplaceBits(stm32.RCC_CFGR_SW_HSI16, stm32.RCC_CFGR_SW_Msk, 0)
-	// SWS is the SW field at bits 3:2: shift the constant, or the comparison
-	// against the masked register is never true - LLVM proves that and marks
-	// everything after the loop unreachable, silently dropping the rest of
-	// the program (measured: a 30 KB firmware links to 4 KB, no warning).
-	// If this loop ever appears to hang, suspect the SWD read path first:
-	// CFGR has been observed to read back 0 over the debug probe while the
-	// core demonstrably ran from HSI16 at the full 16 MHz.
-	for stm32.RCC.CFGR.Get()&stm32.RCC_CFGR_SWS_Msk != (stm32.RCC_CFGR_SWS_HSI16 << 2) {
-	}
+	// System clock: HSI16 at voltage range 2 (see hsi16Up), as dataRecv.
+	hsi16Up(stm32.PWR_CR_VOS_V1_5)
 
 	// Capture: one circular 250-sample window at exactly 16 kSPS
 	// (16 MHz / (2 * (499+1))). adcData is 400 samples long (dataRecv's
 	// double symbol buffer); sync mode uses the first 250 of it, reusing
-	// existing RAM rather than declaring a second buffer. ADCPRE=AHB/2 is
-	// the only setting that is both inside the 14 MHz ADC spec and fast
-	// enough to hit every trigger at this clock (see capture.go; the old
-	// 4.19 MHz PCLK with ADCPRE=1 took ~110 µs per oversampled conversion,
-	// which is where the measured 8.8 kSPS came from).
+	// existing RAM rather than declaring a second buffer. The ADC clock is
+	// HSI16/2, the 8 MHz range 2 allows: a 32x conversion takes 56 us of the
+	// 62.5 us period (see capture.go; at /4 every other trigger is missed,
+	// measured). Until capture.go wrote it before ADEN, this setting was
+	// ignored and the ADC ran HSI16 undivided; the noise did not measurably
+	// change with the fix.
 	startCapture(uint32(uintptr(unsafe.Pointer(&adcData[0]))), syncWindowSize,
-		syncPSC, 1<<28)
+		syncPSC, 1<<stm32.ADC_CCR_PRESC_Pos)
 }
 
 // waitForVOS waits for the power regulator to finish the voltage-scale switch
@@ -183,24 +157,7 @@ func stopSync() {
 
 	stopCapture()
 
-	// Back to the animation clock: switch to MSI first (still Range2, the
-	// idle speed - startSync no longer retunes MSI), then it is legal to drop
-	// the voltage scale again; the flash latency can go either way but WS0
-	// matches the idle config. Order mirrors the power-up half in reverse.
-	stm32.RCC.CFGR.ReplaceBits(stm32.RCC_CFGR_SW_MSI, stm32.RCC_CFGR_SW_Msk, 0)
-	// (MSI is field value 0, so the SWS mask/constant mismatch noted above
-	// cannot bite here.)
-	for stm32.RCC.CFGR.Get()&stm32.RCC_CFGR_SWS_Msk != stm32.RCC_CFGR_SWS_MSI {
-	}
-	stm32.FLASH.SetACR_LATENCY(stm32.Flash_ACR_LATENCY_WS0)
-	stm32.RCC.APB1ENR.SetBits(stm32.RCC_APB1ENR_PWREN)
-	stm32.PWR.CR.ReplaceBits(stm32.PWR_CR_VOS_V1_2, stm32.PWR_CR_VOS_Msk,
-		stm32.PWR_CR_VOS_Pos)
-	waitForVOS()
-	stm32.RCC.APB1ENR.ClearBits(stm32.RCC_APB1ENR_PWREN)
-
-	// Disable HSI16 (nothing else uses it; dataRecv does the same on exit).
-	stm32.RCC.CR.ClearBits(stm32.RCC_CR_HSI16ON)
+	hsi16Down()
 }
 
 // syncPoll consumes everything the DMA has written since the last call and
@@ -209,6 +166,7 @@ func stopSync() {
 //
 //go:noinline
 func syncPoll() {
+	syncProbe() // -tags syncboot only
 	// DMA write position: NDTR counts *remaining* slots down, so the next
 	// sample lands at 250-NDTR.
 	write := int(syncWindowSize - stm32.DMA1.CH[0].NDTR.Get())
@@ -218,11 +176,12 @@ func syncPoll() {
 
 	// Samples available without lapping the writer. The producer adds ~11 per
 	// iteration and never runs ahead of the buffer, so this difference is
-	// always the true backlog; syncFeedCap bounds the burst.
+	// always the true backlog; syncFeedCap bounds the burst. A frame takes
+	// exactly Window samples: the rest wait for the next call. (Feeding the
+	// whole backlog made every frame 250 plus up to the cap, ~1 % long on
+	// average and different each frame; measured with -tags syncboot.)
 	avail := (write - syncRead + syncWindowSize) % syncWindowSize
-	if avail > syncFeedCap {
-		avail = syncFeedCap
-	}
+	avail = min(avail, syncFeedCap, syncdsp.Window-int(syncFed))
 
 	for range avail {
 		syncPipe.ProcessSample(adcData[syncRead])
