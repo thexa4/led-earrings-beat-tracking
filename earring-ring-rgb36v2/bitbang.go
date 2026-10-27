@@ -64,10 +64,16 @@ func setLEDs(index int, led0, led1, led2 uint32) {
 	case 3:
 		a, d = 0, led0
 	}
-	C.bitbang_update_bitplane(a, b, c, d, &bitplanes[index][0])
+	// bitbang_show_leds takes the groups in the order of their common pins'
+	// bits: index 0..8 have PA8..PA0, 9..11 PA15, PA10, PA9.
+	pos := 8 - index
+	if index > 8 {
+		pos = 20 - index
+	}
+	C.bitbang_update_bitplane(a, b, c, d, &bitplanes[pos][0])
 }
 
-var bitplanes [12][3]uint32
+var bitplanes [12][3]uint32 // in bitbang_show_leds order, see setLEDs
 
 // Putting updateLEDs in RAM saves a bit of current consumption.
 // TODO: this goes through a thunk, which adds a few cycles. GCC has

@@ -188,7 +188,7 @@ type Decoder struct {
 	// interpolation, Q4 (see despike).
 	spikeMed, spikeInterp int32
 
-	// Statistics, for tests and telemetry.
+	// Statistics, for tests and telemetry (see keepStats).
 	Stats Stats
 }
 
@@ -265,7 +265,9 @@ func (d *Decoder) despike(w []int32) {
 	}
 	sp.fix(n-2, n-5, 3*(w[n-3]+w[n-1]))
 	sp.fix(n-1, n-5, 6*(2*w[n-2]-w[n-3]))
-	d.Stats.Spikes += sp.count
+	if keepStats {
+		d.Stats.Spikes += sp.count
+	}
 	d.follow(sp.peak)
 	// Track the mean distances (Q4), clipped at the thresholds so that the
 	// impulses themselves do not raise them much.
@@ -506,7 +508,9 @@ func (d *Decoder) search() int {
 	if !ok {
 		return StatusOk
 	}
-	d.Stats.Syncs++
+	if keepStats {
+		d.Stats.Syncs++
+	}
 	d.state = stateMagic1
 	d.symbolIndex = 0
 	d.adjFrac = 0
@@ -596,7 +600,9 @@ func (d *Decoder) calibrate() int {
 	if i == 0 && bits.OnesCount32(sym^content) > 8 {
 		if d.state == statePreamble {
 			// Lost the round boundary; look for a preamble the normal way.
-			d.Stats.Lost++
+			if keepStats {
+				d.Stats.Lost++
+			}
 			d.Reset()
 			return StatusOk
 		}
@@ -697,7 +703,9 @@ func (d *Decoder) data() int {
 	if bits.OnesCount32(sym) < 3 {
 		d.silent++
 		if d.silent >= silentLimit {
-			d.Stats.Lost++
+			if keepStats {
+				d.Stats.Lost++
+			}
 			d.Reset()
 			return StatusOk
 		}
@@ -757,7 +765,9 @@ func (d *Decoder) endPacket(spp uint8) int {
 		return d.endHeader(ok)
 	}
 	if ok {
-		d.Stats.PacketsOK++
+		if keepStats {
+			d.Stats.PacketsOK++
+		}
 		d.fountain.Decode(d.packet[:spp], d.sequence)
 		for d.fountain.Process() {
 		}
@@ -772,10 +782,14 @@ func (d *Decoder) endPacket(spp uint8) int {
 			return StatusReceived
 		}
 	} else {
-		d.Stats.Failed++
+		if keepStats {
+			d.Stats.Failed++
+		}
 		d.failed++
 		if d.failed >= failLimit {
-			d.Stats.Lost++
+			if keepStats {
+				d.Stats.Lost++
+			}
 			d.Reset()
 			return StatusOk
 		}
@@ -786,7 +800,9 @@ func (d *Decoder) endPacket(spp uint8) int {
 	}
 	if int(d.packetNum) == int(d.totalPktsSub1)+1 {
 		// The round is over; the sender restarts with a preamble.
-		d.Stats.Rounds++
+		if keepStats {
+			d.Stats.Rounds++
+		}
 		d.state = statePreamble
 		d.symbolIndex = 0
 		return StatusOk
@@ -805,7 +821,9 @@ func (d *Decoder) endHeader(ok bool) int {
 		d.Reset()
 		return int(datatrans.ErrCodePacketHashMismatch)
 	}
-	d.Stats.Headers++
+	if keepStats {
+		d.Stats.Headers++
+	}
 	p := d.packet
 	version := uint8(p[0])
 	length := uint16(p[0] >> 16)
@@ -868,14 +886,12 @@ func (d *Decoder) repair(spp uint8) bool {
 		syn ^= w
 	}
 	// Candidate 0: flip the least reliable bit of each failing column.
-	for k := range numFreqs {
-		if (syn>>k)&1 != 0 {
-			d.packet[d.idx1[k]] ^= 1 << k
-		}
-	}
+	d.flipFailing(syn)
 	d.packet[spp] |= 3
 	if d.check(spp) {
-		d.Stats.Repaired++
+		if keepStats {
+			d.Stats.Repaired++
+		}
 		return true
 	}
 	// Chase: alternative patterns, cheapest first. For a failing column the
@@ -916,7 +932,9 @@ func (d *Decoder) repair(spp uint8) bool {
 		h := d.packet[spp]
 		d.packet[spp] |= 3
 		if d.check(spp) {
-			d.Stats.Chased++
+			if keepStats {
+				d.Stats.Chased++
+			}
 			return true
 		}
 		d.packet[spp] = h
@@ -927,25 +945,36 @@ func (d *Decoder) repair(spp uint8) bool {
 	if nAtoms > 0 {
 		d.flipPair(col[nAtoms-1])
 	}
-	for k := range numFreqs {
-		if (syn>>k)&1 != 0 {
-			d.packet[d.idx1[k]] ^= 1 << k
-		}
-	}
+	d.flipFailing(syn)
 	for i := range n - 1 {
 		v := d.packet[i]
 		d.packet[i] = v ^ syn
 		h := d.packet[spp]
 		d.packet[spp] |= 3
 		if d.check(spp) {
-			d.Stats.Repaired++
-			d.Stats.SymFix++
+			if keepStats {
+				d.Stats.Repaired++
+				d.Stats.SymFix++
+			}
 			return true
 		}
 		d.packet[spp] = h
 		d.packet[i] = v
 	}
 	return false
+}
+
+// flipFailing flips the least reliable bit of each column whose parity fails
+// in syn: repair's first candidate, and (being an XOR) its undo. One copy:
+// -opt=2 unrolls the loop.
+//
+//go:noinline
+func (d *Decoder) flipFailing(syn uint32) {
+	for k := range numFreqs {
+		if (syn>>k)&1 != 0 {
+			d.packet[d.idx1[k]] ^= 1 << k
+		}
+	}
 }
 
 // flipPair flips column k's two least reliable bits (a Chase atom).

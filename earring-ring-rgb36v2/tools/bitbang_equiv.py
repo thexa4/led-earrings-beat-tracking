@@ -25,12 +25,32 @@ src = "".join(subprocess.run(["cpp", "-P", path], capture_output=True, text=True
                            os.path.join(here, "bitbang_ref.h")))
 
 
-def asm_of(name):
-    m = re.search(r"\b%s\s*\(.*?__asm__\s+__volatile__\s*\((.*?)\n\s*:" % re.escape(name), src, re.S)
+def asm_blocks(name):
+    """The instructions of each asm statement in function name, in order."""
+    m = re.search(r"\b%s\s*\((.*?)\n}" % re.escape(name), src, re.S)
     if not m:
         sys.exit(f"{name} not found in bitbang.h")
-    text = "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1)))
-    return [i.strip() for i in text.replace("\\t", "").split("\\n") if i.strip()]
+    blocks = []
+    for body in re.findall(r"__asm__\s+__volatile__\s*\((.*?)\s*:", m.group(1), re.S):
+        text = "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', body))
+        blocks.append([i.strip() for i in text.replace("\\t", "").split("\\n") if i.strip()])
+    return blocks
+
+
+def asm_of(name):
+    return asm_blocks(name)[0]
+
+
+def generic_prog():
+    """bitbang_update_bitplane as straight-line code: the first bitplane, then
+    the loop's four (the C stores a word after every one but the second)."""
+    first, plane = asm_blocks("bitbang_update_bitplane")
+    prog = list(first)
+    for i in range(4):
+        prog += plane
+        if i != 1:
+            prog.append("str %%[tmp], [%%[bitplane], #%d]" % (4 * (i - (i > 1))))
+    return prog, len(first) + len(plane)
 
 
 def run(prog, regs):
@@ -84,7 +104,7 @@ def run(prog, regs):
 
 
 def main():
-    generic = asm_of("bitbang_update_bitplane")
+    generic, ninsns = generic_prog()
     groups = [asm_of(f"bitbang_update_bitplane_{g}") for g in (1, 2, 3, 4)]
     # setLEDs: which LED goes to slots a, b, c, d for each group (None = off).
     slots = [(0, None, 2, 1), (0, 2, None, 1), (0, 2, 1, None), (None, 2, 1, 0)]
@@ -99,15 +119,16 @@ def main():
             want = run(groups[g], {"tmp": tmp, "led0": leds[0], "led1": leds[1],
                                    "led2": leds[2], "N8": 8, "xor": 0b1000011111111111})
             arg = [0 if s is None else leds[s] for s in slots[g]]
-            got = run(generic, {"tmp": tmp, "a": arg[0], "b": arg[1], "c": arg[2],
-                                "d": arg[3], "N8": 8})
+            # The C inverts the slots and clears tmp before the asm.
+            got = run(generic, {"tmp": 0, "a": ~arg[0] & M, "b": ~arg[1] & M,
+                                "c": ~arg[2] & M, "d": ~arg[3] & M, "N8": 8})
             if got != want:
                 print(f"group {g + 1} leds={[hex(v) for v in leds]}:")
                 for k in sorted(want):
                     print(f"  +{k}: want {want[k]:08x} got {got.get(k, 0):08x}")
                 sys.exit(1)
             n += 1
-    print(f"identical on {n} cases ({len(generic)} vs {sum(map(len, groups))} instructions)")
+    print(f"identical on {n} cases ({ninsns} vs {sum(map(len, groups))} instructions)")
 
 
 if __name__ == "__main__":

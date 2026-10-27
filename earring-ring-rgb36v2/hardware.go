@@ -224,12 +224,7 @@ func enableMic() {
 		// Wait until ready.
 		for (stm32.ADC.ISR.Get() & stm32.ADC_ISR_EOC) == 0 {
 		}
-
-		// Read sample, and add it to the buffer.
-		sum += int(stm32.ADC.DR.Get())
-
-		// Start the next conversion.
-		stm32.ADC.CR.Set(stm32.ADC_CR_ADEN | stm32.ADC_CR_ADSTART)
+		sum += int(micSample())
 	}
 	micDCOffset = sum / calibNum
 }
@@ -256,11 +251,18 @@ func disableMic() {
 }
 
 func updateMic(index int) {
-	// Read sample, and add it to the buffer.
-	micSamples[index] = uint16(stm32.ADC.DR.Get())
+	micSamples[index] = micSample()
+}
 
-	// Start the next conversion.
+// micSample reads the last conversion and starts the next one. A call, also
+// in enableMic's calibration loop, which -opt=2 would otherwise unroll four
+// times.
+//
+//go:noinline
+func micSample() uint16 {
+	v := uint16(stm32.ADC.DR.Get())
 	stm32.ADC.CR.Set(stm32.ADC_CR_ADEN | stm32.ADC_CR_ADSTART)
+	return v
 }
 
 //go:noinline

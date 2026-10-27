@@ -546,9 +546,11 @@ Measured 2026-10-27 on scream-rx (re-measure):
   image - as `tools/synccpu.py` does; `flash erase_address` refuses the 128-byte page
   outright.
 - **CPU load in sync mode** (`tools/synccpu.py`, `-tags syncboot`, which counts loop
-  passes): the analysis takes ~9.4 M cycles/s (59%), a loop pass ~1230 cycles plus
+  passes): the analysis takes ~9.4 M cycles/s (59%), a loop pass ~1360 cycles plus
   three `getPixel` calls, and the pipeline falls behind below 667 passes/s - so about
-  2900 cycles per `getPixel`. Loss shows as frames/s under the earring's sample rate
+  2850 cycles per `getPixel`. (A pass was ~1230 cycles before `updateLEDs` and
+  `setLEDs` became loops to save flash: 4844 instead of 5374 passes/s with an empty
+  program.) Loss shows as frames/s under the earring's sample rate
   / 250 (43/s with 16 divisions per pixel); the backlog is only a hint, as it is
   sampled from the host.
 - **What both microphones heard, frame by frame** (`tools/syncbands.py record`,
