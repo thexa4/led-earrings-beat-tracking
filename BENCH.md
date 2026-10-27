@@ -622,3 +622,15 @@ Measured 2026-10-27 on scream-rx (re-measure):
   that line also contains what the pattern looks for (e.g. a `pkill -f "ssh .*-L
   4445:"` followed by the `ssh -L 4445:...` that reopens the tunnel kills its own
   shell). Run the pkill as a command of its own.
+- **A receive can sit on a walked clock trim.** R, the user's headphone, one build
+  and one sender: time to a received program ranged from 5 s to over 90 s. Every
+  quick receive locked at TIM22 PSC 801; the slow one sat at 797 with nothing
+  verified for over 90 s. The receiver keeps its trim across the decoder's resets,
+  and a lock that has verified a header keeps its trims after it is lost: one lost
+  lock's drift ran to -900 (Q8, -3.5 samples per symbol) and walked the clock to 802
+  before the decoder reset. The receiver now goes back to PSC 799 after 5 s without
+  a verified packet. Test: a hardware breakpoint in `dataRecv`'s loop at the first
+  window, trim (sp+92 in that build) set to -2 and PSC to 797. Nothing verified,
+  PSC was 799 at 5 s, and the program came in at 15 s. The end of a receive is the
+  capture stopping (`adcRead` frozen, PSC reads 0): when the sender resends the
+  program already in the slot, `animationBuf[0]` does not change.

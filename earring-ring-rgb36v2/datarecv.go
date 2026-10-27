@@ -23,6 +23,11 @@ const (
 	// and drifts further with temperature, and the sender's clock adds its
 	// own error. +-20 steps is +-2.5%.
 	maxTrim = 20
+
+	// Windows (one symbol, 20 ms) without a verified packet after which the
+	// receiver drops its clock trim, 5 s: a working lock verifies a packet
+	// at least every 15 windows (14 words and the hash symbol).
+	staleWindows = 250
 )
 
 // Size of a program slot in flash memory.
@@ -243,6 +248,7 @@ func receiveData(slot int) {
 	button2WasReleased := false // true once button 2 was released once (for exiting the receiver)
 	whiteWasOn := false         // used for blinking LED
 	trim := int32(0)
+	stale := staleWindows // windows left until the trim is dropped
 
 	adcBase, adcLast = 0, 0
 	adcRead = adcWritten()
@@ -255,8 +261,24 @@ func receiveData(slot int) {
 		adcRead += uint32(int32(decoder.Adjust()))
 		telemWindow() // -tags screamtelem only
 
-		// Follow the sender's clock.
-		if t := int32(decoder.RateTrim()); t != 0 {
+		// Follow the sender's clock, but go back to the nominal one after
+		// staleWindows without a verified packet. The trim outlives the
+		// decoder's resets so that the clock keeps following the sender, but
+		// a lock can walk it away from the sender before it is lost, and
+		// later locks that never verify give back only their own trims, so
+		// nothing brings it back (bench: one receive sat at PSC 797 against
+		// a sender at 801 and verified nothing for over 90 s; receives that
+		// started from 799 took 5 to 18 s). The decoder resets first, so
+		// that this RateTrim drains its give-back too.
+		stalled := stale == 0
+		if stalled {
+			decoder.Reset()
+		}
+		t := int32(decoder.RateTrim())
+		if stalled {
+			t = -trim
+		}
+		if t != 0 {
 			trim = max(-maxTrim, min(maxTrim, trim+t))
 			stm32.TIM22.PSC.Set(uint32(clockPrescaler + trim))
 		}
@@ -282,7 +304,8 @@ func receiveData(slot int) {
 			continue
 		}
 
-		if decoder.ReceivingValid() && !whiteWasOn {
+		valid := decoder.ReceivingValid()
+		if valid && !whiteWasOn {
 			// Blink the LEDs white-ish.
 			setIndicatorPin(A11, machine.PinInputPulldown)
 			whiteWasOn = true
@@ -290,6 +313,12 @@ func receiveData(slot int) {
 			// Go back to the previous (purple) color.
 			setIndicatorPin(A11, machine.PinInput)
 			whiteWasOn = false
+		}
+		// Once per stall is enough: a trim that outlives a lock was made by
+		// one that verified a packet, which starts the count again.
+		stale--
+		if valid {
+			stale = staleWindows
 		}
 
 		// Exit on button2 press (but don't exit immediately when button2 is
